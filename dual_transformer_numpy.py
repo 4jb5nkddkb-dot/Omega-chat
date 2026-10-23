@@ -36,6 +36,7 @@ Toy task:   python dual_transformer_numpy.py --task arith --seq-len 8 --steps 20
 from __future__ import annotations
 
 import argparse
+import collections
 import csv
 import json
 import math
@@ -417,6 +418,118 @@ def _pick_token(logits, temperature: float, rng, top_k: int = 0, top_p: float = 
     return int(rng.choice(len(p), p=p))
 
 
+# ----------------------------------------------------------------------------
+# Runtime decode control: entropy monitoring, loop detection, no-repeat-ngram
+# blocking and a temperature controller. These are pure functions over logits
+# and token IDs; they never touch model state, so they wrap any sampler.
+# ----------------------------------------------------------------------------
+
+def token_entropy(logits, temperature: float = 1.0) -> float:
+    """Shannon entropy (nats) of softmax(logits / temperature). temperature<=0 is treated as 1."""
+    z = np.asarray(logits, dtype=np.float64) / (temperature if temperature > 0 else 1.0)
+    z = z - z.max()
+    p = np.exp(z)
+    p /= p.sum()
+    return float(-(p * np.log(p + 1e-12)).sum())
+
+
+def suffix_repeats(ids, n: int = 8, window: int = 128) -> bool:
+    """True if the last n tokens already occurred earlier inside the recent window (a loop)."""
+    if n <= 0 or len(ids) <= n:
+        return False
+    tail = list(ids[-window:])
+    suffix = tuple(tail[-n:])
+    return any(tuple(tail[i:i + n]) == suffix for i in range(len(tail) - n))
+
+
+def banned_next_tokens(ids, n: int = 4, window: int = 64) -> set:
+    """Tokens that would complete an n-gram already seen in the recent window.
+
+    Blocking every such token guarantees the output never repeats an n-gram inside the window.
+    """
+    if n <= 0:
+        return set()
+    tail = list(ids[-window:])
+    if len(tail) < n:
+        return set()
+    prefix = tuple(tail[len(tail) - (n - 1):]) if n > 1 else ()
+    banned = set()
+    for i in range(len(tail) - n + 1):
+        if tuple(tail[i:i + n - 1]) == prefix:
+            banned.add(int(tail[i + n - 1]))
+    return banned
+
+
+class DecodeController:
+    """Runtime controller for sampling.
+
+    - Blocks tokens that would recreate an n-gram already in the recent window (block_ngram).
+    - Flags looping when the last `loop_len` tokens already occurred earlier in the window.
+      While looping, the temperature is pushed up; with base temperature 0 the step samples
+      at loop_temperature instead of taking the argmax.
+    - Tracks the rolling mean entropy of the distribution actually sampled from and adjusts
+      the temperature multiplicatively toward target_entropy: low entropy (collapse) raises
+      it, high entropy (drift) lowers it. Disable with adapt=False.
+    """
+
+    def __init__(self, base_temperature: float = 0.0, target_entropy: float = 1.0,
+                 gain: float = 0.5, window: int = 16, block_ngram: int = 4,
+                 loop_len: int = 8, loop_temperature: float = 0.8,
+                 t_min: float = 0.2, t_max: float = 1.5, adapt: bool = True):
+        if base_temperature < 0 or t_min <= 0 or t_max < t_min:
+            raise ValueError("need base_temperature >= 0 and 0 < t_min <= t_max")
+        self.base = float(base_temperature)
+        self.target = float(target_entropy)
+        self.gain = float(gain)
+        self.hist = collections.deque(maxlen=window)
+        self.block_ngram = block_ngram
+        self.loop_len = loop_len
+        self.loop_temperature = float(loop_temperature)
+        self.t_min, self.t_max = float(t_min), float(t_max)
+        self.adapt = adapt
+        self.temp = self.base
+        self.trace = []  # one (entropy, temperature, looping, n_blocked) tuple per step
+
+    def _next_temperature(self, looping: bool) -> float:
+        if not self.adapt:
+            return self.base
+        if self.base == 0:
+            return self.loop_temperature if looping else 0.0
+        if looping:
+            self.temp = min(self.temp * 1.25, self.t_max)
+        elif self.hist:
+            mean_h = float(np.mean(self.hist))
+            self.temp = float(np.clip(self.temp * np.exp(self.gain * (self.target - mean_h)),
+                                      self.t_min, self.t_max))
+        return self.temp
+
+    def choose(self, logits, ids, rng=None, top_k: int = 0, top_p: float = 1.0) -> int:
+        logits = np.asarray(logits, dtype=np.float64).copy()
+        looping = suffix_repeats(ids, self.loop_len) if self.loop_len else False
+        banned = banned_next_tokens(ids, self.block_ngram) if self.block_ngram else set()
+        if banned:
+            masked = logits.copy()
+            for t in banned:
+                masked[t] = -np.inf
+            if np.isfinite(masked).any():
+                logits = masked
+        temp = self._next_temperature(looping)
+        h = token_entropy(logits, temp)
+        self.hist.append(h)
+        self.trace.append((h, temp, looping, len(banned)))
+        return _pick_token(logits, temp, rng, top_k, top_p)
+
+    def summary(self) -> str:
+        if not self.trace:
+            return "decode: no steps"
+        hs = [t[0] for t in self.trace]
+        ts = [t[1] for t in self.trace]
+        return (f"decode: steps={len(hs)} mean_entropy={np.mean(hs):.3f} "
+                f"loop_steps={sum(t[2] for t in self.trace)} "
+                f"blocked_candidates={sum(t[3] for t in self.trace)} "
+                f"temp_range=[{min(ts):.2f},{max(ts):.2f}]")
+
+
 class DualTransformerNP:
     def __init__(self, d_model=64, n_blocks=2, n_heads=4,
                  merge_method="average", use_rms=True, max_seq=512,
@@ -620,8 +733,17 @@ class DualTransformerNP:
             result.append(_pick_token(logits, temperature, rng, top_k, top_p))
         return result
 
-    def generate_cached(self, prompt_ids, max_new_tokens=100, temperature=0.0, rng=None, top_k=0, top_p=1.0):
-        """KV-cached generation; the cache is rebuilt when the sliding window rolls."""
+    def generate_cached(self, prompt_ids, max_new_tokens=100, temperature=0.0, rng=None, top_k=0, top_p=1.0,
+                        controller: Optional[DecodeController] = None,
+                        logit_hook=None, stop_fn=None):
+        """KV-cached generation; the cache is rebuilt when the sliding window rolls.
+
+        If a DecodeController is given it picks each token (its base temperature replaces
+        `temperature`); otherwise the plain sampler is used.
+
+        logit_hook(result, logits) -> logits may mask tokens before sampling (grammar constraints).
+        stop_fn(result) -> bool ends generation early after the token just appended.
+        """
         self._check_prompt(prompt_ids)
         if max_new_tokens < 0 or temperature < 0:
             raise ValueError("max_new_tokens must be non-negative and temperature >= 0")
@@ -631,8 +753,16 @@ class DualTransformerNP:
         ctx = result[-self.max_seq:]
         logits, pasts = self.forward_cached(np.array([ctx], dtype=np.int64))
         for generated_i in range(max_new_tokens):
-            nxt = _pick_token(logits[0, -1], temperature, rng, top_k, top_p)
+            step_logits = logits[0, -1]
+            if logit_hook is not None:
+                step_logits = logit_hook(result, step_logits)
+            if controller is not None:
+                nxt = controller.choose(step_logits, result, rng, top_k, top_p)
+            else:
+                nxt = _pick_token(step_logits, temperature, rng, top_k, top_p)
             result.append(nxt)
+            if stop_fn is not None and stop_fn(result):
+                break
             if generated_i + 1 == max_new_tokens:
                 break
             if len(ctx) < self.max_seq:
@@ -1150,7 +1280,7 @@ def tie_and_final_norm_gradient_test():
 
 def tokenizer_and_checkpoint_meta_test():
     import tempfile
-    tok = CharTokenizer.from_text("你好，世界！Hello")
+    tok = CharTokenizer.from_text("你好,世界!Hello")
     text = "世界你好"
     assert tok.decode(tok.encode(text, add_bos=True, add_eos=True)) == text
     assert tok.encode("猫")[0] == CharTokenizer.UNK          # unseen character -> UNK
@@ -1175,9 +1305,58 @@ def tokenizer_and_checkpoint_meta_test():
     print("Char tokenizer, tokenizer metadata in checkpoint, tied-weight round trip OK")
 
 
+def decode_control_test():
+    """Entropy bounds, loop detection, no-repeat blocking, controller direction and bounds."""
+    V = 12
+    assert abs(token_entropy(np.zeros(V)) - math.log(V)) < 1e-9
+    peaked = np.full(V, -50.0)
+    peaked[3] = 0.0
+    assert token_entropy(peaked) < 1e-6
+    assert suffix_repeats([1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8], 8)
+    assert not suffix_repeats(list(range(16)), 8)
+    assert banned_next_tokens([1, 2, 3, 4, 1, 2, 3], 4) == {4}
+    assert banned_next_tokens([1, 2, 3], 4) == set()
+
+    # The controller must refuse the token that would complete a repeated 4-gram.
+    ctrl = DecodeController(base_temperature=0.0, block_ngram=4, loop_len=0)
+    logits = np.zeros(V)
+    logits[8] = 10.0
+    assert ctrl.choose(logits, [5, 6, 7, 8, 5, 6, 7], rng=None) != 8
+
+    # Temperature direction: collapsed (peaked) output pushes T up, drifting (uniform) pushes it down.
+    up = DecodeController(base_temperature=0.5, target_entropy=1.0, block_ngram=0, loop_len=0,
+                          t_min=0.1, t_max=3.0)
+    for _ in range(5):
+        up.choose(peaked, [0], rng=np.random.default_rng(0))
+    assert up.temp > 0.5, up.temp
+    down = DecodeController(base_temperature=0.5, target_entropy=1.0, block_ngram=0, loop_len=0,
+                            t_min=0.1, t_max=3.0)
+    for _ in range(5):
+        down.choose(np.zeros(V), [0], rng=np.random.default_rng(0))
+    assert down.temp < 0.5, down.temp
+
+    # Greedy controlled generation: no 4-gram may repeat anywhere in the output (guaranteed by blocking).
+    model = DualTransformerNP(d_model=16, n_blocks=2, n_heads=4, merge_method="average",
+                              max_seq=8, seed=79, dtype=np.float64)
+    prompt = [BOS_ID, 97, 98, 99]
+    out = model.generate_cached(prompt, 40, controller=DecodeController(0.0, block_ngram=4))
+    assert len(out) == len(prompt) + 40
+    grams = [tuple(out[i:i + 4]) for i in range(len(out) - 3)]
+    assert len(set(grams)) == len(grams), "repeated 4-gram despite no-repeat blocking"
+
+    # Sampled controlled generation: correct length, temperatures stay within bounds, deterministic.
+    c1 = DecodeController(base_temperature=0.9, target_entropy=2.0, block_ngram=4, loop_len=8)
+    o1 = model.generate_cached(prompt, 40, temperature=0.9, rng=np.random.default_rng(3), controller=c1)
+    c2 = DecodeController(base_temperature=0.9, target_entropy=2.0, block_ngram=4, loop_len=8)
+    o2 = model.generate_cached(prompt, 40, temperature=0.9, rng=np.random.default_rng(3), controller=c2)
+    assert len(o1) == len(prompt) + 40 and o1 == o2
+    assert all(c1.t_min - 1e-9 <= t[1] <= c1.t_max + 1e-9 for t in c1.trace)
+    print(f"Decode control test OK: {c1.summary()}")
+
+
 def smoke_test():
     tok = ByteTokenizer()
-    sample = "你好，Omega!\n"
+    sample = "你好,Omega!\n"
     assert tok.decode(tok.encode(sample)) == sample
     assert tok.decode(tok.encode(sample, add_bos=True, add_eos=True)) == sample
     assert tok.encode("x", add_bos=True, add_eos=True) == [BOS_ID, ord("x"), EOS_ID]
@@ -1208,6 +1387,7 @@ def smoke_test():
     toy_training_test()
     tie_and_final_norm_gradient_test()
     tokenizer_and_checkpoint_meta_test()
+    decode_control_test()
     print("ALL SMOKE TESTS PASSED")
 
 
@@ -1225,6 +1405,16 @@ def generalization_report(model, train_ids, held_ids, seq_len, batch_size, seed,
     print(f"held-out improvement     : {base_held - trained_held:.4f}")
     print(f"held-out minus training   : {trained_held - trained_train:.4f}  (large = memorizing)")
     return {"untrained_held": base_held, "trained_train": trained_train, "trained_held": trained_held}
+
+
+def make_controller(args):
+    """None when no decode control was requested, so default sampling is unchanged."""
+    if not (args.entropy_control or args.no_repeat_ngram):
+        return None
+    return DecodeController(base_temperature=args.temperature, target_entropy=args.target_entropy,
+                            block_ngram=args.no_repeat_ngram,
+                            loop_len=8 if args.entropy_control else 0,
+                            adapt=args.entropy_control)
 
 
 def main():
@@ -1269,6 +1459,11 @@ def main():
     ap.add_argument("--no-scaled-init", action="store_true", help="disable 1/sqrt(2*blocks) residual init scaling")
     ap.add_argument("--held-out", type=str, default=None,
                     help="optional text file never used for training; reports generalization vs an untrained model")
+    ap.add_argument("--entropy-control", action="store_true",
+                    help="adapt temperature toward --target-entropy and detect loops")
+    ap.add_argument("--target-entropy", type=float, default=1.0, help="nats; used with --entropy-control")
+    ap.add_argument("--no-repeat-ngram", type=int, default=0,
+                    help="block any token completing an already-seen n-gram (0 = off)")
     args = ap.parse_args()
     if args.test:
         smoke_test()
@@ -1283,6 +1478,8 @@ def main():
         ap.error("--top-k must be >= 0")
     if not 0.0 < args.top_p <= 1.0:
         ap.error("--top-p must be in (0, 1]")
+    if args.no_repeat_ngram < 0:
+        ap.error("--no-repeat-ngram must be >= 0")
     sample_rng = np.random.default_rng(args.seed)
 
     if args.task != "corpus":
@@ -1302,8 +1499,11 @@ def main():
             warmup_steps=args.warmup_steps, log_csv=args.log_csv, batch_fn=toy_batch)
         print(f"toy task={args.task}: completed_step={completed_step}; final_train_loss={loss:.4f}")
         prompt = [0, 1, 2, 3]
+        ctrl = make_controller(args)
         out = model.generate_cached(prompt, 8, temperature=args.temperature, rng=sample_rng,
-                                    top_k=args.top_k, top_p=args.top_p)
+                                    top_k=args.top_k, top_p=args.top_p, controller=ctrl)
+        if ctrl is not None:
+            print(ctrl.summary())
         print(f"prompt={prompt} output={out}")
         return
 
@@ -1357,8 +1557,12 @@ def main():
             ap.error("held-out text is shorter than --seq-len + 1")
         generalization_report(model, train_ids, held_ids, args.seq_len, args.batch_size, args.seed)
     prompt = tokenizer.encode(args.prompt, add_bos=True)
+    ctrl = make_controller(args)
     output = model.generate_cached(prompt, args.new_tokens, temperature=args.temperature,
-                                   rng=sample_rng, top_k=args.top_k, top_p=args.top_p)
+                                   rng=sample_rng, top_k=args.top_k, top_p=args.top_p,
+                                   controller=ctrl)
+    if ctrl is not None:
+        print(ctrl.summary())
     print(tokenizer.decode(output))
 
 
