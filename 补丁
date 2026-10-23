@@ -1,0 +1,57 @@
+if __name__ == "__main__":
+    import os
+    
+    # 1. 尝试动态构建分词器的临时编解码函数（如果原文件有现成的请优先用原文件的）
+    if 'encode' not in globals() or 'decode' not in globals():
+        print("💡 提示：正在自动补充字节分词器...")
+        def encode(text: str) -> list[int]:
+            return list(text.encode("utf-8"))
+        def decode(ids: list[int]) -> str:
+            return bytearray([i for i in ids if 0 <= i <= 255]).decode("utf-8", errors="replace")
+
+    # 2. 自动寻找你目录下的权重文件
+    ckpt_path = "modern_ckpt.npz"
+    if not os.path.exists(ckpt_path):
+        ckpt_path = "dual_transformer.npz" # 备用名称
+
+    print(f"⏳ 正在初始化模型并加载权重文件: {ckpt_path} ...")
+    
+    try:
+        # 这里假设你的模型类名叫 ModernDualTransformer
+        # 如果你运行后报错提示找不到这个名字，请把它改成你文件里实际定义的那个类名（例如 DualTransformerNP）
+        model = ModernDualTransformer(d_model=128, n_blocks=4, n_q_heads=8, n_kv_heads=2)
+        
+        # 加载权重
+        ckpt = np.load(ckpt_path, allow_pickle=True)
+        if "params" in ckpt:
+            model.params = {k: v for k, v in ckpt["params"].item().items()}
+        else:
+            for k in model.params:
+                p_key = "p_" + k if "p_" + k in ckpt.files else k
+                if p_key in ckpt.files:
+                    model.params[k] = ckpt[p_key].astype(np.float32)
+        print("✅ 权重加载成功！大模型已觉醒。")
+        
+        # 3. 进入交互式续写循环
+        print("\n" + "="*40)
+        print("🌟 欢迎来到手写 NumPy 大模型自回归续写终端 🌟")
+        print("输入 'q' 或 'exit' 可以退出程序")
+        print("="*40 + "\n")
+        
+        while True:
+            user_prompt = input("✍️ 请输入初始提示词（如：悟空）：")
+            if user_prompt.strip().lower() in ('q', 'exit'):
+                print("👋 退出程序。")
+                break
+            if not user_prompt.strip():
+                continue
+                
+            print("🤖 大模型正在思考续写中...")
+            # 调用你截图里第 515 行定义的 generate 函数，默认续写 50 个词
+            result_text = generate(model, prompt=user_prompt, length=50)
+            print(f"\n🔥 续写结果：\n{result_text}\n")
+            print("-" * 40)
+            
+    except Exception as e:
+        print(f"❌ 运行失败，原因: {e}")
+        print("💡 如果提示类名不存在，请在代码中将 'ModernDualTransformer' 修改为你文件里真实的类名。")
