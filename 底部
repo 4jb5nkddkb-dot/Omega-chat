@@ -16,10 +16,8 @@ if str(BASE) not in sys.path:
 
 
 def main() -> None:
-    # 💡 1. 严格使用你老代码原本的导入类
     from dual_transformer_numpy import CharTokenizer, DualTransformerNP
 
-    # 💡 2. 自动寻找你老代码保存的那个权重文件（如果不在当前目录，它会去子目录找）
     ckpt = BASE / "modern_ckpt.npz"
     if not ckpt.exists():
         ckpt = BASE / "ckpt_dual" / "modern_ckpt_last.npz"
@@ -28,26 +26,20 @@ def main() -> None:
         print("找不到权重文件，请确认配置路径*")
         return
 
-    # 💡 3. 手动初始化词表：老代码通常是用固定的本地文本文件去建立词表，这里我们使用标准西游记常用中文字符集
-    # 如果你的老代码有特定的 chars.txt，它会自动读取。这里做安全兼容：
     chars_file = BASE / "chars.txt"
     if chars_file.exists():
         with open(chars_file, "r", encoding="utf-8") as f:
             chars = [c for c in f.read()]
     else:
-        # 如果没有本地词表文件，直接使用默认初始化方式
         z = np.load(ckpt, allow_pickle=True)
         if "chars" in z:
             chars = [str(c) for c in z["chars"]]
         else:
-            # 终极保底：老代码可能直接在脚本里硬编码了词表或使用基础配置
-            print("提示：未在权重中发现词表，使用默认分词器加载...")
-            chars = [chr(i) for i in range(19968, 40870)] # 覆盖常用中文字符
+            chars = [chr(i) for i in range(19968, 40870)] 
 
     tok = CharTokenizer(chars)
     z = np.load(ckpt, allow_pickle=False)
 
-    # 💡 4. 硬编码对齐老笔记本能跑通的 128 维度结构，彻底规避 KeyError
     d = 128
     blocks = 4
     qh = 4
@@ -64,7 +56,6 @@ def main() -> None:
         seed=42
     )
     
-    # 💡 5. 自动兼容两种命名暗号（param: 或 param::）
     for k in model.params:
         if f"param::{k}" in z:
             model.params[k][:] = z[f"param::{k}"]
@@ -76,7 +67,6 @@ def main() -> None:
     print("\n====== 权重加载成功！老笔记本生存模式就绪 ======")
     print("====== 已进入实时对话模式（输入 exit 退出） ======\n")
 
-    # 💡 6. 开启绝对不会报错的交互式无限对话循环
     while True:
         try:
             user_input = input("用户 (User) >>> ")
@@ -88,12 +78,11 @@ def main() -> None:
             if not user_input.strip():
                 continue
 
-            # 编码、生成（每次最多生成 32 个字，保障老电脑秒回）、解码
             ids = tok.encode(user_input, add_bos=True)
-            out = model.generate(ids, max_new_n=32, temperature=0.8, top_p=0.95, seed=None)
+            # 💡 这里已将 seed=None 彻底剔除，只保留你的老代码最稳妥支持的原生参数
+            out = model.generate(ids, max_new_tokens=32, temperature=0.8, top_p=0.95)
             response = tok.decode(out)
             
-            # 干净漂亮地把回答打印在屏幕上
             print(f"模型 (Bot)  >>> {response}\n")
             
         except KeyboardInterrupt:
