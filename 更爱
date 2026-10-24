@@ -1,0 +1,61 @@
+def main() -> None:
+    from dual_transformer_numpy import CharTokenizer
+    from modern_transformer_numpy import ModernTransformerNumpy
+
+    ckpt = BASE / "modern_ckpt.npz"
+    if not ckpt.exists():
+        print(f"找不到 modern_ckpt.npz，请先运行 train_modern.py 训练一次*")
+        return
+
+    # 1. 加载模型权重和配置
+    z = np.load(ckpt, allow_pickle=False)
+    cfg = z["cfg"]
+    d, blocks, qh, kvh, vocab = (int(cfg[0]), int(cfg[1]), int(cfg[2]),
+                                 int(cfg[3]), int(cfg[4]))
+
+    tok = CharTokenizer([str(c) for c in z["chars"]])
+    assert tok.vocab_size == vocab, "*检查点词表与文件不一致*"
+    model = ModernTransformerNumpy(d_model=d, n_blocks=blocks, n_q_heads=qh,
+                                  n_kv_heads=kvh, vocab_size=vocab)
+
+    for k in model.params:
+        model.params[k][:] = z[f"param:{k}"]
+        
+    print(f"====== 已加载检查点: d={d} blocks={blocks} q/kv={qh}/{kvh} ======")
+    print(f"训练步数={int(cfg[5])} 最佳验证loss={float(z['val'][0]):.4f}")
+    print("====== 已进入实时对话模式（输入 exit 退出） ======\n")
+
+    # 2. 开启实时对话循环
+    while True:
+        try:
+            # 接收键盘输入
+            prompt = input("用户 (User) >>> ")
+            
+            # 如果输入 exit，则退出程序
+            if prompt.strip().lower() == "exit":
+                print("退出对话。")
+                break
+                
+            # 如果用户直接敲回车输入为空，提醒重新输入
+            if not prompt.strip():
+                continue
+
+            # 将文本编码为 ID (加入 bos 保证生成开头正常)
+            ids = tok.encode(prompt, add_bos=True)
+            
+            # 让模型生成新的 Token（这里将 max_new_n 设为 64，你可以根据需要调整）
+            out = model.generate(ids, max_new_n=64, temperature=0.8, top_p=0.95, seed=None)
+            
+            # 解码并打印模型的回答
+            response = tok.decode(out)
+            
+            # 优化显示：如果模型返回的文本里包含了你输入的 prompt，可以把它裁掉，只看回答
+            if response.startswith(prompt):
+                response = response[len(prompt):]
+                
+            print(f"模型 (Bot)  >>> {response}\n")
+            
+        except KeyboardInterrupt:
+            # 支持 Ctrl+C 退出
+            print("\n退出对话。")
+            break
