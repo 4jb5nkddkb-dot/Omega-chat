@@ -1,5 +1,12 @@
 import numpy as np
 
+
+ckpt = np.load('C:/Users/zhang/Documents/模型/modern_ckpt.npz', allow_pickle=True)
+if 'meta' in ckpt.files:
+    print(ckpt['meta'])
+
+
+
 # 加载你的 npz 存档
 ckpt = np.load('modern_ckpt.npz', allow_pickle=True)
 
