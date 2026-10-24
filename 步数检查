@@ -1,0 +1,11 @@
+import numpy as np
+
+# 加载你的 npz 存档
+ckpt = np.load('modern_ckpt.npz', allow_pickle=True)
+
+# 打印里面包含的所有键（Key），找找有没有叫 'step'、'global_step' 或类似名字的字段
+print("存档里包含的键：", ckpt.files)
+
+# 如果里面存了 step，可以直接打印出来
+if 'step' in ckpt.files:
+    print("累计总步数 (step):", ckpt['step'])
