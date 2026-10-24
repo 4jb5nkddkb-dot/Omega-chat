@@ -1,0 +1,16 @@
+# 找到原本代码中固定 prompt 的地方，通常是 prompt = "悟空" 之类的
+# 将它修改为可以循环接收键盘输入的模式：
+
+if __name__ == "__main__":
+    print("====== 欢迎进入大模型对话模式 ======")
+    while True:
+        user_input = input("\n用户 (User): ")
+        if user_input.strip() == "exit":
+            print("退出对话。")
+            break
+            
+        # 调用你代码里的生成函数（这里名称需要对齐你脚本里的具体函数名，比如叫 generate）
+        # 将 user_input 作为 prompt 传进去
+        print("模型 (Bot): ", end="")
+        generate(prompt=user_input, new_tokens=64) 
+        print() # 换行
