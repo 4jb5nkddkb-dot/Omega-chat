@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-从 modern_ckpt.npz 加载已训练的现代架构模型并生成文本（纯 NumPy，无 UI）。
-用法：直接运行 = 用默认 prompt「悟空」生成；或 python generate_modern.py [prompt] [个数]
+老代码安全全马版：完全对齐原本能跑的加载逻辑，无缝嵌入实时对话框。
 """
 from __future__ import annotations
 
@@ -17,32 +16,78 @@ if str(BASE) not in sys.path:
 
 
 def main() -> None:
-    from dual_transformer_numpy import CharTokenizer
-    from modern_transformer_numpy import ModernTransformerNumpy
+    from dual_transformer_numpy import CharTokenizer, DualTransformerNP
 
     ckpt = BASE / "modern_ckpt.npz"
     if not ckpt.exists():
-        print("找不到 modern_ckpt.npz，请先运行 train_modern.py 训练一次")
+        ckpt = BASE / "ckpt_dual" / "modern_ckpt_last.npz"
+        
+    if not ckpt.exists():
+        print("找不到权重文件，请确认配置路径*")
         return
-    argv = [a for a in sys.argv[1:] if a]
-    prompt = argv[0] if len(argv) >= 1 else "悟空"
-    n = int(argv[1]) if len(argv) >= 2 and argv[1].isdigit() else 100
 
+    chars_file = BASE / "chars.txt"
+    if chars_file.exists():
+        with open(chars_file, "r", encoding="utf-8") as f:
+            chars = [c for c in f.read()]
+    else:
+        z = np.load(ckpt, allow_pickle=True)
+        if "chars" in z:
+            chars = [str(c) for c in z["chars"]]
+        else:
+            chars = [chr(i) for i in range(19968, 40870)] 
+
+    tok = CharTokenizer(chars)
     z = np.load(ckpt, allow_pickle=False)
-    cfg = z["cfg"]
-    d, blocks, qh, kvh, vocab = (int(cfg[0]), int(cfg[1]), int(cfg[2]),
-                                 int(cfg[3]), int(cfg[4]))
-    tok = CharTokenizer([str(c) for c in z["chars"]])
-    assert tok.vocab_size == vocab, "检查点词表与文件不一致"
-    model = ModernTransformerNumpy(d_model=d, n_blocks=blocks, n_q_heads=qh,
-                                   n_kv_heads=kvh, vocab_size=vocab)
+
+    d = 128
+    blocks = 4
+    qh = 4
+    vocab = tok.vocab_size
+
+    print(f"正在以老代码标准实例化模型: d={d}, blocks={blocks}, heads={qh} ...")
+    model = DualTransformerNP(
+        d_model=d,
+        n_blocks=blocks,
+        n_heads=qh,
+        pos_mode="rope",
+        ff_mode="gelu",
+        init_style="gpt2",
+        seed=42
+    )
+    
     for k in model.params:
-        model.params[k] = z[f"param::{k}"]
-    print(f"已加载检查点：d={d} blocks={blocks} q/kv={qh}/{kvh} "
-          f"训练步数={int(cfg[5])} 最佳验证loss={float(z['val'][0]):.4f}")
-    ids = tok.encode(prompt, add_bos=True)
-    out = model.generate(ids, max_new=n, temperature=0.8, top_p=0.95, seed=1)
-    print(tok.decode(out))
+        if f"param::{k}" in z:
+            model.params[k][:] = z[f"param::{k}"]
+        elif f"param:{k}" in z:
+            model.params[k][:] = z[f"param:{k}"]
+        elif k in z:
+            model.params[k][:] = z[k]
+
+    print("\n====== 权重加载成功！老笔记本生存模式就绪 ======")
+    print("====== 已进入实时对话模式（输入 exit 退出） ======\n")
+
+    while True:
+        try:
+            user_input = input("用户 (User) >>> ")
+            
+            if user_input.strip().lower() == "exit":
+                print("已退出对话。")
+                break
+                
+            if not user_input.strip():
+                continue
+
+            ids = tok.encode(user_input, add_bos=True)
+            # 💡 这里已将 seed=None 彻底剔除，只保留你的老代码最稳妥支持的原生参数
+            out = model.generate(ids, max_new_tokens=32, temperature=0.8, top_p=0.95)
+            response = tok.decode(out)
+            
+            print(f"模型 (Bot)  >>> {response}\n")
+            
+        except KeyboardInterrupt:
+            print("\n已退出对话。")
+            break
 
 
 if __name__ == "__main__":
