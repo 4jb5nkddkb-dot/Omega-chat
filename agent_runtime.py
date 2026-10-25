@@ -269,9 +269,90 @@ def contains_verifier(expected: str) -> Callable[[str], tuple]:
     return verify
 
 
+# Actions whose tool call writes to memory. Kept as a named set (not derived from
+# the policy table) so the second door is explicit: it must match
+# memory_store.make_memory_tools' default remember_name and the governance
+# policy's confirm-required memory action.
+MEMORY_WRITE_ACTIONS = frozenset({"记住"})
+
+
+def _run_governed_tool(router: ToolRouter, text: str, governance,
+                       token_provider) -> tuple:
+    """One governed tool turn, mirroring ToolRouter.dispatch's visible outcomes.
+
+    Returns ("tool", ok, out) for a handled turn (caller appends the tool result
+    to ctx exactly as the ungoverned path does), or ("denied", name, arg, reason)
+    when the call must not execute. On denial nothing is executed, no tool
+    result is appended, and memory is untouched; the caller ends the run with
+    the denial visible in events.
+
+    Order per call: parse (same regex dispatch uses) -> ToolGate.authorize ->
+    token resolution for approval-required actions -> MemoryGate.authorize_write
+    for memory writes -> ToolGate.execute. CheckpointGate and Rollback are
+    deliberately not consulted here: they govern release workflow and governance
+    files, not per-turn tool calls.
+    """
+    # Lazy import: the ungoverned path must never depend on omega_governance.
+    from omega_governance import ALLOW, DENY, HOLD
+    tool_gate = getattr(governance, "tools", None) or getattr(governance, "tool_gate", None)
+    memory_gate = getattr(governance, "memory", None) or getattr(governance, "memory_gate", None)
+    if tool_gate is None:
+        raise ValueError("governance must expose a ToolGate as .tools (omega_governance.Governance)")
+    m = router._call_re.search(text)
+    if m is None:
+        return ("tool", False, "错误:格式不完整")
+    name, arg = m.group(1), m.group(2).strip()
+    if name not in router.tools:
+        # Never executes; the gate still records the out-of-allowlist attempt.
+        tool_gate.authorize(name, arg)
+        return ("tool", False, f"未知工具:{name}")
+    decision = tool_gate.authorize(name, arg)
+    verdict, reason = decision["decision"], decision["reason"]
+    if verdict == DENY:
+        return ("denied", name, arg, reason)
+    token = None
+    if verdict == HOLD:
+        if reason == "paused":
+            return ("denied", name, arg, reason)
+        # Approval-required: a token must arrive from the caller (run_agent has
+        # no user confirmation channel). No token -> enforce via execute so the
+        # denial is audited as a DENY record, without running anything and
+        # without touching the memory door.
+        token = token_provider(name, arg) if token_provider is not None else None
+        if token is None:
+            tool_gate.execute(None, name, arg, router.tools[name])
+            return ("denied", name, arg, "token required")
+    # Second door for memory writes, before any execution.
+    if name in MEMORY_WRITE_ACTIONS and memory_gate is not None:
+        mem = memory_gate.authorize_write(arg)
+        if mem["decision"] != ALLOW:
+            return ("denied", name, arg, mem["reason"])
+    result = tool_gate.execute(token, name, arg, router.tools[name])
+    if result["executed"]:
+        return ("tool", True, str(result["result"])[:router.max_result_chars])
+    err = result["error"] or "denied"
+    if err in ("paused", "action not in allowlist", "token required") or err.startswith("token "):
+        return ("denied", name, arg, err)
+    # The tool itself raised: mirror dispatch's feedback format.
+    typename = err.split(": ", 1)[0] if ": " in err else err
+    return ("tool", False, f"错误:{typename}")
+
+
 def run_agent(model, router: ToolRouter, prompt: str, verifier, *, max_new: int = 96,
               max_turns: int = 6, max_retries: int = 2, temperature: float = 0.0, rng=None,
-              controller_factory: Optional[Callable[[], object]] = None) -> AgentResult:
+              controller_factory: Optional[Callable[[], object]] = None,
+              governance=None, token_provider=None) -> AgentResult:
+    """Closed loop. governance=None preserves existing behavior exactly.
+
+    With governance (an omega_governance.Governance-like object exposing .tools
+    and .memory), every tool dispatch is authorized before execution; a denial
+    ends the run with a ("denied", name, arg, reason) event and nothing
+    appended to ctx. token_provider(action, arg) -> token | None supplies
+    one-time confirmation tokens for approval-required actions; without it
+    those actions are always denied, so governance stays opt-in: enabling it
+    by default would break 记住-class actions until a confirmation channel
+    reaches the loop.
+    """
     p, tok = router.p, router.tok
     ctx = tok.encode(prompt, add_bos=True)
     events, turns, retries = [], 0, 0
@@ -285,11 +366,21 @@ def run_agent(model, router: ToolRouter, prompt: str, verifier, *, max_new: int 
         events.append(("generated", text))
 
         if p.call_open in text:                       # tool turn
-            res = router.dispatch(text)
-            if res is None:
-                ok, out = False, "错误:格式不完整"
-            else:
-                ok, out = res
+            if governance is None:
+                res = router.dispatch(text)
+                if res is None:
+                    ok, out = False, "错误:格式不完整"
+                else:
+                    ok, out = res
+                events.append(("tool", ok, out))
+                ctx = seg + tok.encode(f"{p.result_open}{out}{p.result_close}")
+                continue
+            outcome = _run_governed_tool(router, text, governance, token_provider)
+            if outcome[0] == "denied":
+                _, name, arg, reason = outcome
+                events.append(("denied", name, arg, reason))
+                return AgentResult(False, text, turns, retries, ctx, events)
+            _, ok, out = outcome
             events.append(("tool", ok, out))
             ctx = seg + tok.encode(f"{p.result_open}{out}{p.result_close}")
             continue
