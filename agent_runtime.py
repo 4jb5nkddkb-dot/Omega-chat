@@ -329,7 +329,13 @@ def _roundtrip_ok(tok, s):
 def runtime_test(corpus="Xiyouji.txt", ckpt="modern_ckpt.npz"):
     import tempfile
     base = Path(__file__).resolve().parent
-    model, tok, _ = load_modern_model(base / ckpt, base / corpus)
+    # Prefer the SFT checkpoint when it exists (device acceptance passed 2026-10-24);
+    # fall back to the base checkpoint on a fresh checkout without one.
+    ckpt_path = base / ckpt
+    if ckpt == "modern_ckpt.npz" and (base / "modern_ckpt_sft.npz").exists():
+        ckpt_path = base / "modern_ckpt_sft.npz"
+    print(f"runtime_test using checkpoint: {ckpt_path.name}")
+    model, tok, _ = load_modern_model(ckpt_path, base / corpus)
     chars_ok = "".join(sorted(set(
         Protocol().reserved_chars() + "计算回忆记住二加三五答案是六七除乘点零一")))
     assert all(c in tok.chars for c in chars_ok), "test characters must exist in the corpus"
