@@ -12,10 +12,11 @@ agent_runtime.py、make_tool_data.py、memory_store.py、Xiyouji.txt、modern_ck
 安全：开训前自动把 modern_ckpt.npz 复制为 modern_ckpt_v1_backup.npz 并打印
 sha256（已存在则不覆盖）；成果写 modern_ckpt_sft.npz，绝不覆盖原检查点。
 
-配方（v4 定版）：记录对齐采样（问题与调用同窗）、加权 masked loss
-（操作数 ×5 / 调用其余 ×2 / 答案 ×1 / 语料回放 ×1）、协议占比 0.5、
-lr 5e-4 cosine、2000 步、batch 8。
+配方（v5 定版，v4 + 答案复制值加权）：记录对齐采样（问题与调用同窗）、
+加权 masked loss（操作数 ×5 / 调用其余 ×2 / 答案模板 ×2 / 答案中被复制
+的值 ×5 / 语料回放 ×1）、协议占比 0.5、lr 5e-4 cosine、2000 步、batch 8。
 本地验证（替身 d64 ckpt, val 5.379）：三例全通，抄写探针 162/162，
+162 道计算题走 run_agent 全通（v4 是 161/162，挂在九乘九的第二位数字上），
 val 5.284 无退化。真检查点（val 4.688）余量更足。
 
 用法：直接运行；或 python sft_train.py steps=200 lr=5e-4 之类临时改配置。
@@ -43,7 +44,7 @@ from memory_store import MemoryStore, make_memory_tools
 
 BASE = Path(__file__).resolve().parent
 CONFIG = dict(steps=2000, lr=5e-4, batch=8, seq=64, proto_share=0.5,
-              w_op=5.0, w_call=2.0, w_ans=1.0, seed=7, probe=True)
+              w_op=5.0, w_call=2.0, w_ans=2.0, seed=7, probe=True)
 P = Protocol()
 CN = "一二三四五六七八九"
 
@@ -112,7 +113,12 @@ def record_example(rec, tok, cfg):
             if pos >= len(ids):
                 break
             if not is_call:
-                w[pos] = cfg["w_ans"]
+                # v5：答案里被复制的值（“答案是”之后、句号之前）也是从结果里
+                # 抄来的目标，和操作数同级 ×5；其余答案模板 ×2。
+                if seg.startswith("答案是") and 3 <= j - s < len(seg) - 1:
+                    w[pos] = cfg["w_op"]
+                else:
+                    w[pos] = cfg["w_ans"]
             else:
                 after_name = j > s + len(P.call_open) + 2  # 《 + 两字工具名之后
                 w[pos] = cfg["w_op"] if (after_name and rec["text"][j] != P.call_close) \
