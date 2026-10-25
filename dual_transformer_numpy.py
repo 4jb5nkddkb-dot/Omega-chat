@@ -8,6 +8,10 @@ Features:
     "single"  - one branch only (baseline)
     "average" - two branches, mean of outputs
     "concat"  - two branches, concatenated outputs (larger LM head)
+- Consolidated options: grouped-query attention (n_kv_heads < n_heads), RoPE or
+  learned position embeddings (pos_mode), GELU or SwiGLU feed-forward (ff_mode),
+  GPT-2 style N(0, 0.02) initialization (init_style="gpt2"; "legacy" restores
+  the original initialization)
 - Byte-level UTF-8 tokenizer (no external vocabulary files)
 - AdamW with decoupled weight decay and global-norm gradient clipping
 - Next-token training, greedy/temperature/top-k/top-p generation, KV-cached generation
@@ -223,24 +227,29 @@ def _rope_bwd(dy, cos, sin):
     return out
 
 
-def _attn_fwd(h, params, pre, n_heads, offset, past):
+def _attn_fwd(h, params, pre, n_heads, n_kv_heads, use_rope, offset, past):
     B, S, D = h.shape
-    H, Dh = n_heads, D // n_heads
+    H, Hkv = n_heads, n_kv_heads
+    Dh = D // H
+    Dkv = Hkv * Dh
+    group = H // Hkv
     qkv = h @ params[pre + "attn.qkv.weight"].T
-    q, k, v = np.split(qkv, 3, axis=-1)
-
-    def heads(z):
-        return z.reshape(B, S, H, Dh).transpose(0, 2, 1, 3)
-
-    q, k, v = heads(q), heads(k), heads(v)
+    q = qkv[..., :D].reshape(B, S, H, Dh).transpose(0, 2, 1, 3)
+    k = qkv[..., D:D + Dkv].reshape(B, S, Hkv, Dh).transpose(0, 2, 1, 3)
+    v = qkv[..., D + Dkv:].reshape(B, S, Hkv, Dh).transpose(0, 2, 1, 3)
     pos = np.arange(offset, offset + S)
-    cos, sin = _rope_tables(pos, Dh, q.dtype)
-    q, k = _rope(q, cos, sin), _rope(k, cos, sin)
+    cos = sin = None
+    if use_rope:
+        cos, sin = _rope_tables(pos, Dh, q.dtype)
+        q, k = _rope(q, cos, sin), _rope(k, cos, sin)
     if past is not None:
-        k_all = np.concatenate([past[0], k], axis=2)
-        v_all = np.concatenate([past[1], v], axis=2)
+        k_u = np.concatenate([past[0], k], axis=2)
+        v_u = np.concatenate([past[1], v], axis=2)
     else:
-        k_all, v_all = k, v
+        k_u, v_u = k, v
+    # GQA: each KV head serves `group` query heads; repeat for the attention math.
+    k_all = np.repeat(k_u, group, axis=1) if group > 1 else k_u
+    v_all = np.repeat(v_u, group, axis=1) if group > 1 else v_u
     Tk = k_all.shape[2]
     # Offset-aware causal mask: a query at absolute position p sees keys at positions <= p.
     mask = np.arange(Tk)[None, :] <= pos[:, None]
@@ -253,48 +262,80 @@ def _attn_fwd(h, params, pre, n_heads, offset, past):
     o = P @ v_all
     o2 = o.transpose(0, 2, 1, 3).reshape(B, S, D)
     out = o2 @ params[pre + "attn.proj.weight"].T
-    cache = (h, q, k_all, v_all, P, o2, cos, sin, scale)
-    return out, cache, (k_all, v_all)
+    cache = (h, q, k_all, v_all, P, o2, cos, sin, scale, Hkv)
+    return out, cache, (k_u, v_u)
 
 
 def _attn_bwd(dout, cache, params, grads, pre):
-    h, q, k, v, P, o2, cos, sin, scale = cache
+    h, q, k, v, P, o2, cos, sin, scale, Hkv = cache
     B, S, D = h.shape
     H, Dh = q.shape[1], q.shape[3]
+    Dkv = Hkv * Dh
+    group = H // Hkv
     grads[pre + "attn.proj.weight"] += dout.reshape(-1, D).T @ o2.reshape(-1, D)
     do = (dout @ params[pre + "attn.proj.weight"]).reshape(B, S, H, Dh).transpose(0, 2, 1, 3)
     dP = do @ v.transpose(0, 1, 3, 2)
     dv = P.transpose(0, 1, 3, 2) @ do
     dS = P * (dP - np.sum(dP * P, axis=-1, keepdims=True)) * scale
-    dq = _rope_bwd(dS @ k, cos, sin)
-    dk = _rope_bwd(dS.transpose(0, 1, 3, 2) @ q, cos, sin)
+    if cos is not None:
+        dq = _rope_bwd(dS @ k, cos, sin)
+        dk = _rope_bwd(dS.transpose(0, 1, 3, 2) @ q, cos, sin)
+    else:
+        dq = dS @ k
+        dk = dS.transpose(0, 1, 3, 2) @ q
+    if group > 1:
+        # Sum the gradients of the repeated KV heads back into their source head.
+        dk = dk.reshape(B, Hkv, group, S, Dh).sum(axis=2)
+        dv = dv.reshape(B, Hkv, group, S, Dh).sum(axis=2)
 
-    def merge(z):
-        return z.transpose(0, 2, 1, 3).reshape(B, S, D)
+    def merge(z, width):
+        return z.transpose(0, 2, 1, 3).reshape(B, S, width)
 
-    dqkv = np.concatenate([merge(dq), merge(dk), merge(dv)], axis=-1)
-    grads[pre + "attn.qkv.weight"] += dqkv.reshape(-1, 3 * D).T @ h.reshape(-1, D)
+    dqkv = np.concatenate([merge(dq, D), merge(dk, Dkv), merge(dv, Dkv)], axis=-1)
+    grads[pre + "attn.qkv.weight"] += dqkv.reshape(-1, D + 2 * Dkv).T @ h.reshape(-1, D)
     return dqkv @ params[pre + "attn.qkv.weight"]
 
 
-def _block_fwd(params, pre, x, n_heads, use_rms, offset, past):
+def _sigmoid(x):
+    return 0.5 * (1.0 + np.tanh(0.5 * x))
+
+
+def _block_fwd(params, pre, x, n_heads, n_kv_heads, use_rms, use_rope, ff_mode, offset, past):
     n1, c_n1 = _norm_fwd(x, params, pre + "norm1", use_rms)
-    a, c_a, kv = _attn_fwd(n1, params, pre, n_heads, offset, past)
+    a, c_a, kv = _attn_fwd(n1, params, pre, n_heads, n_kv_heads, use_rope, offset, past)
     x1 = x + a
     n2, c_n2 = _norm_fwd(x1, params, pre + "norm2", use_rms)
-    f1 = _linear_fwd(n2, params, pre + "ff1")
-    g, t = _gelu_fwd(f1)
-    f2 = _linear_fwd(g, params, pre + "ff2")
+    if ff_mode == "swiglu":
+        g1 = _linear_fwd(n2, params, pre + "ff_gate")
+        u = _linear_fwd(n2, params, pre + "ff_up")
+        act = g1 * _sigmoid(g1) * u
+        f2 = _linear_fwd(act, params, pre + "ff2")
+        ff_cache = ("swiglu", n2, g1, u, act)
+    else:
+        f1 = _linear_fwd(n2, params, pre + "ff1")
+        g, t = _gelu_fwd(f1)
+        f2 = _linear_fwd(g, params, pre + "ff2")
+        ff_cache = ("gelu", n2, f1, g, t)
     y = x1 + f2
-    cache = (c_n1, c_a, c_n2, n2, f1, g, t)
+    cache = (c_n1, c_a, c_n2, ff_cache)
     return y, cache, kv
 
 
 def _block_bwd(dy, cache, params, grads, pre, use_rms):
-    c_n1, c_a, c_n2, n2, f1, g, t = cache
-    dg = _linear_bwd(dy, g, params, grads, pre + "ff2")
-    df1 = _gelu_bwd(dg, f1, t)
-    dn2 = _linear_bwd(df1, n2, params, grads, pre + "ff1")
+    c_n1, c_a, c_n2, ff_cache = cache
+    if ff_cache[0] == "swiglu":
+        _, n2, g1, u, act = ff_cache
+        dact = _linear_bwd(dy, act, params, grads, pre + "ff2")
+        s = _sigmoid(g1)
+        du = dact * (g1 * s)
+        dg1 = (dact * u) * s * (1.0 + g1 * (1.0 - s))
+        dn2 = _linear_bwd(dg1, n2, params, grads, pre + "ff_gate") \
+            + _linear_bwd(du, n2, params, grads, pre + "ff_up")
+    else:
+        _, n2, f1, g, t = ff_cache
+        dg = _linear_bwd(dy, g, params, grads, pre + "ff2")
+        df1 = _gelu_bwd(dg, f1, t)
+        dn2 = _linear_bwd(df1, n2, params, grads, pre + "ff1")
     dx1 = dy + _norm_bwd(dn2, c_n2, params, grads, pre + "norm2", use_rms)
     dn1 = _attn_bwd(dx1, c_a, params, grads, pre)
     return dx1 + _norm_bwd(dn1, c_n1, params, grads, pre + "norm1", use_rms)
@@ -534,7 +575,9 @@ class DualTransformerNP:
     def __init__(self, d_model=64, n_blocks=2, n_heads=4,
                  merge_method="average", use_rms=True, max_seq=512,
                  seed=0, dtype=np.float32, vocab_size=VOCAB_SIZE, final_norm=True,
-                 tie_embeddings=False, scaled_init=True):
+                 tie_embeddings=False, scaled_init=True,
+                 n_kv_heads=None, pos_mode="rope", ff_mode="gelu",
+                 init_style="gpt2"):
         if merge_method not in MERGE_METHODS:
             raise ValueError(f"merge_method must be one of {MERGE_METHODS}")
         if d_model <= 0 or n_blocks <= 0 or max_seq <= 0:
@@ -547,11 +590,25 @@ class DualTransformerNP:
             raise ValueError("tie_embeddings needs an output width equal to d_model (not concat)")
         if vocab_size < 2:
             raise ValueError("vocab_size must be >= 2")
+        if n_kv_heads is None:
+            n_kv_heads = n_heads
+        if n_kv_heads <= 0 or n_heads % n_kv_heads:
+            raise ValueError("n_heads must be divisible by n_kv_heads")
+        if pos_mode not in ("rope", "learned"):
+            raise ValueError('pos_mode must be "rope" or "learned"')
+        if ff_mode not in ("gelu", "swiglu"):
+            raise ValueError('ff_mode must be "gelu" or "swiglu"')
+        if init_style not in ("gpt2", "legacy"):
+            raise ValueError('init_style must be "gpt2" or "legacy"')
         self.merge_method = merge_method
         self.vocab_size = int(vocab_size)
         self.final_norm = bool(final_norm)
         self.tie_embeddings = bool(tie_embeddings)
         self.scaled_init = bool(scaled_init)
+        self.n_kv_heads = int(n_kv_heads)
+        self.pos_mode = pos_mode
+        self.ff_mode = ff_mode
+        self.init_style = init_style
         self.dtype = np.dtype(dtype)
         self.params = self._init_params(seed)
 
@@ -569,6 +626,9 @@ class DualTransformerNP:
             "final_norm": self.final_norm,
             "tie_embeddings": self.tie_embeddings,
             "scaled_init": self.scaled_init,
+            "n_kv_heads": self.n_kv_heads,
+            "pos_mode": self.pos_mode,
+            "ff_mode": self.ff_mode,
         }
 
     def _head_weight(self):
@@ -577,32 +637,59 @@ class DualTransformerNP:
     def _branches(self):
         return ("left",) if self.merge_method == "single" else ("left", "right")
 
+    def _ff_dim(self):
+        if self.ff_mode == "swiglu":
+            return max(1, int(round(8 * self.d_model / 3)))
+        return 4 * self.d_model
+
     def _init_params(self, seed):
         rng = np.random.default_rng(seed)
         D, V, dt = self.d_model, self.vocab_size, self.dtype
-        p = {"emb": rng.standard_normal((V, D)).astype(dt)}
+        gpt2 = self.init_style == "gpt2"
+        if gpt2:
+            p = {"emb": (rng.standard_normal((V, D)) * 0.02).astype(dt)}
+        else:
+            p = {"emb": rng.standard_normal((V, D)).astype(dt)}
+        if self.pos_mode == "learned":
+            if gpt2:
+                p["wpe"] = (rng.standard_normal((self.max_seq, D)) * 0.02).astype(dt)
+            else:
+                p["wpe"] = rng.standard_normal((self.max_seq, D)).astype(dt)
         # GPT-2 style: outputs of residual branches are scaled by 1/sqrt(2 * n_blocks).
         res_scale = 1.0 / math.sqrt(2 * self.n_blocks) if self.scaled_init else 1.0
 
         def linear(name, out_f, in_f, bias, scale=1.0):
-            bound = scale / math.sqrt(in_f)
-            p[name + ".weight"] = rng.uniform(-bound, bound, (out_f, in_f)).astype(dt)
-            if bias:
-                p[name + ".bias"] = rng.uniform(-bound, bound, (out_f,)).astype(dt)
+            if gpt2:
+                p[name + ".weight"] = (rng.standard_normal((out_f, in_f)) * (0.02 * scale)).astype(dt)
+                if bias:
+                    p[name + ".bias"] = np.zeros(out_f, dt)
+            else:
+                bound = scale / math.sqrt(in_f)
+                p[name + ".weight"] = rng.uniform(-bound, bound, (out_f, in_f)).astype(dt)
+                if bias:
+                    p[name + ".bias"] = rng.uniform(-bound, bound, (out_f,)).astype(dt)
 
+        Dh = D // self.n_heads
+        qkv_out = D + 2 * self.n_kv_heads * Dh
+        H = self._ff_dim()
         for name in self._branches():
             for i in range(self.n_blocks):
                 pre = f"{name}.{i}."
                 p[pre + "norm1.weight"] = np.ones(D, dt)
                 if not self.use_rms:
                     p[pre + "norm1.bias"] = np.zeros(D, dt)
-                linear(pre + "attn.qkv", 3 * D, D, bias=False)
+                linear(pre + "attn.qkv", qkv_out, D, bias=False)
                 linear(pre + "attn.proj", D, D, bias=False, scale=res_scale)
                 p[pre + "norm2.weight"] = np.ones(D, dt)
                 if not self.use_rms:
                     p[pre + "norm2.bias"] = np.zeros(D, dt)
-                linear(pre + "ff1", 4 * D, D, bias=True)
-                linear(pre + "ff2", D, 4 * D, bias=True, scale=res_scale)
+                if self.ff_mode == "swiglu":
+                    linear(pre + "ff_gate", H, D, bias=True)
+                    linear(pre + "ff_up", H, D, bias=True)
+                    linear(pre + "ff2", D, H, bias=True, scale=res_scale)
+                else:
+                    linear(pre + "ff1", 4 * D, D, bias=True)
+                    linear(pre + "ff2", D, 4 * D, bias=True, scale=res_scale)
         out_dim = 2 * D if self.merge_method == "concat" else D
         if self.final_norm:
             p["final_norm.weight"] = np.ones(out_dim, dt)
@@ -640,6 +727,9 @@ class DualTransformerNP:
         if offset + S > self.max_seq:
             raise ValueError("KV cache plus input chunk exceeds max_seq; reset/re-prefill cache")
         x = self.params["emb"][tokens]
+        if self.pos_mode == "learned":
+            pos = np.arange(offset, offset + S)
+            x = x + self.params["wpe"][pos][None, :, :]
         outs, caches, new_kv = {}, {}, {}
         for name in self._branches():
             h = x
@@ -647,7 +737,8 @@ class DualTransformerNP:
             for i in range(self.n_blocks):
                 past = pasts[name][i] if pasts is not None else None
                 h, cache, kv = _block_fwd(self.params, f"{name}.{i}.", h,
-                                          self.n_heads, self.use_rms, offset, past)
+                                          self.n_heads, self.n_kv_heads, self.use_rms,
+                                          self.pos_mode == "rope", self.ff_mode, offset, past)
                 bc.append(cache)
                 kvs.append(kv)
             outs[name] = h
@@ -713,6 +804,9 @@ class DualTransformerNP:
                                 f"{name}.{i}.", self.use_rms)
             dx_total += dy
         np.add.at(grads["emb"], tokens.reshape(-1), dx_total.reshape(-1, D))
+        if self.pos_mode == "learned":
+            B, S = tokens.shape
+            np.add.at(grads["wpe"], np.tile(np.arange(S), B), dx_total.reshape(-1, D))
         return loss, grads
 
     def _check_prompt(self, prompt_ids):
@@ -934,7 +1028,13 @@ def train_steps(model: DualTransformerNP, token_ids=None, steps=500, batch_size=
     if resume_from:
         ck = read_checkpoint(resume_from)
         meta = ck["meta"]
-        if meta["config"] != model.config():
+        saved_cfg = dict(meta["config"])
+        # Checkpoints written before the GQA/SwiGLU/pos options existed lack the
+        # new keys; their values are the legacy defaults filled in here.
+        saved_cfg.setdefault("n_kv_heads", saved_cfg.get("n_heads"))
+        saved_cfg.setdefault("pos_mode", "rope")
+        saved_cfg.setdefault("ff_mode", "gelu")
+        if saved_cfg != model.config():
             raise ValueError(f"resume checkpoint config {meta['config']} "
                              f"does not match model config {model.config()}")
         if not meta["has_optimizer"]:
@@ -942,6 +1042,8 @@ def train_steps(model: DualTransformerNP, token_ids=None, steps=500, batch_size=
         if set(ck["params"]) != set(model.params):
             raise ValueError("resume checkpoint parameter names do not match the model")
         for k in model.params:
+            if ck["params"][k].shape != model.params[k].shape:
+                raise ValueError(f"shape mismatch for {k}")
             model.params[k] = ck["params"][k].astype(model.dtype)
         optimizer.load_state(ck["m"], ck["v"], meta["optimizer_t"])
         start_step = int(meta["step"])
@@ -1280,7 +1382,7 @@ def tie_and_final_norm_gradient_test():
 
 def tokenizer_and_checkpoint_meta_test():
     import tempfile
-    tok = CharTokenizer.from_text("你好,世界!Hello")
+    tok = CharTokenizer.from_text("你好，世界！Hello")
     text = "世界你好"
     assert tok.decode(tok.encode(text, add_bos=True, add_eos=True)) == text
     assert tok.encode("猫")[0] == CharTokenizer.UNK          # unseen character -> UNK
@@ -1303,6 +1405,60 @@ def tokenizer_and_checkpoint_meta_test():
         xx = np.array([ids[:4]], dtype=np.int64)
         assert np.array_equal(model.forward(xx), loaded.forward(xx))
     print("Char tokenizer, tokenizer metadata in checkpoint, tied-weight round trip OK")
+
+
+def extended_modes_test():
+    """Finite-difference checks for the consolidated options: GQA, SwiGLU,
+    learned positions, and combinations (float64), plus GQA KV-cache parity."""
+    rng = np.random.default_rng(999)
+    x = np.array([[BOS_ID, 97, 98]], dtype=np.int64)
+    y = np.array([[97, 98, 99]], dtype=np.int64)
+    eps = 1e-6
+    cases = [
+        dict(merge_method="single", n_kv_heads=1, ff_mode="swiglu", pos_mode="rope", use_rms=True),
+        dict(merge_method="average", n_kv_heads=1, ff_mode="gelu", pos_mode="learned", use_rms=False),
+        dict(merge_method="average", n_kv_heads=2, ff_mode="swiglu", pos_mode="learned",
+             use_rms=True, tie_embeddings=True),
+        dict(merge_method="concat", n_kv_heads=1, ff_mode="swiglu", pos_mode="rope", use_rms=False),
+    ]
+    checked = 0
+    for case in cases:
+        model = DualTransformerNP(d_model=8, n_blocks=1, n_heads=2, max_seq=8,
+                                  seed=999, dtype=np.float64, **case)
+        _, grads = model.loss_and_grads(x, y)
+        assert set(grads) == set(model.params)
+        for name, arr in model.params.items():
+            for _ in range(min(arr.size, 3)):
+                idx = np.unravel_index(int(rng.integers(arr.size)), arr.shape)
+                orig = arr[idx]
+                arr[idx] = orig + eps
+                lp = model.loss(x, y)
+                arr[idx] = orig - eps
+                lm = model.loss(x, y)
+                arr[idx] = orig
+                numeric = (lp - lm) / (2 * eps)
+                analytic = float(grads[name][idx])
+                abs_err = abs(analytic - numeric)
+                rel_err = abs_err / max(abs(analytic), abs(numeric), 1e-12)
+                if not (abs_err < 1e-7 or rel_err < 1e-4):
+                    raise AssertionError(f"{case} {name}{idx}: analytic={analytic:.12g}, numeric={numeric:.12g}")
+                checked += 1
+    print(f"Extended-mode gradient checks OK: {checked} sampled entries (GQA/SwiGLU/learned-pos combos)")
+
+    model = DualTransformerNP(d_model=16, n_blocks=2, n_heads=4, merge_method="average",
+                              n_kv_heads=2, ff_mode="swiglu", pos_mode="learned",
+                              max_seq=6, seed=78, dtype=np.float64)
+    tokens = np.array([[BOS_ID, 97, 98, 99, 100, EOS_ID]], dtype=np.int64)
+    full = model.forward(tokens)
+    pasts, parts = None, []
+    for i in range(tokens.shape[1]):
+        part, pasts = model.forward_cached(tokens[:, i:i + 1], pasts)
+        parts.append(part)
+    cached = np.concatenate(parts, axis=1)
+    max_err = float(np.abs(full - cached).max())
+    if not np.allclose(full, cached, atol=1e-10, rtol=1e-10):
+        raise AssertionError(f"GQA KV cache parity failed: max_err={max_err}")
+    print(f"Extended-mode KV parity OK (GQA+learned): max_logit_error={max_err:.2e}")
 
 
 def decode_control_test():
@@ -1356,7 +1512,7 @@ def decode_control_test():
 
 def smoke_test():
     tok = ByteTokenizer()
-    sample = "你好,Omega!\n"
+    sample = "你好，Omega!\n"
     assert tok.decode(tok.encode(sample)) == sample
     assert tok.decode(tok.encode(sample, add_bos=True, add_eos=True)) == sample
     assert tok.encode("x", add_bos=True, add_eos=True) == [BOS_ID, ord("x"), EOS_ID]
@@ -1387,6 +1543,7 @@ def smoke_test():
     toy_training_test()
     tie_and_final_norm_gradient_test()
     tokenizer_and_checkpoint_meta_test()
+    extended_modes_test()
     decode_control_test()
     print("ALL SMOKE TESTS PASSED")
 
@@ -1464,6 +1621,14 @@ def main():
     ap.add_argument("--target-entropy", type=float, default=1.0, help="nats; used with --entropy-control")
     ap.add_argument("--no-repeat-ngram", type=int, default=0,
                     help="block any token completing an already-seen n-gram (0 = off)")
+    ap.add_argument("--kv-heads", type=int, default=None,
+                    help="KV heads for grouped-query attention (default: same as --heads)")
+    ap.add_argument("--pos", choices=("rope", "learned"), default="rope",
+                    help="position scheme: RoPE or learned position embeddings")
+    ap.add_argument("--ff", choices=("gelu", "swiglu"), default="gelu",
+                    help="feed-forward: GELU MLP or SwiGLU")
+    ap.add_argument("--init", choices=("gpt2", "legacy"), default="gpt2",
+                    help="gpt2: N(0,0.02) initialization (tie-safe); legacy: original initialization")
     args = ap.parse_args()
     if args.test:
         smoke_test()
@@ -1486,7 +1651,9 @@ def main():
         if args.resume or args.held_out:
             ap.error("--resume and --held-out apply only to --task corpus")
         model = DualTransformerNP(args.d_model, args.blocks, args.heads, args.merge,
-                                  args.norm == "rms", args.max_seq, seed=args.seed)
+                                  args.norm == "rms", args.max_seq, seed=args.seed,
+                                  n_kv_heads=args.kv_heads, pos_mode=args.pos,
+                                  ff_mode=args.ff, init_style=args.init)
 
         def toy_batch(r):
             return make_toy_batch(args.batch_size, args.seq_len, r, args.task)
@@ -1537,7 +1704,9 @@ def main():
                                   vocab_size=tokenizer.vocab_size,
                                   final_norm=not args.no_final_norm,
                                   tie_embeddings=args.tie_embeddings,
-                                  scaled_init=not args.no_scaled_init)
+                                  scaled_init=not args.no_scaled_init,
+                                  n_kv_heads=args.kv_heads, pos_mode=args.pos,
+                                  ff_mode=args.ff, init_style=args.init)
     if model.vocab_size != tokenizer.vocab_size:
         ap.error("checkpoint vocabulary does not match its stored tokenizer")
     _, loss, best_val, completed_step = train_steps(
