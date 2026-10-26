@@ -112,6 +112,68 @@ def load_modern_model(ckpt_path, corpus_path):
 
 
 # ----------------------------------------------------------------------------
+# Checkpoint formats: dual files carry meta_json (config + embedded tokenizer);
+# modern files carry cfg + chars + param:: keys. The loader below dispatches
+# on that structure, so a dual checkpoint needs no corpus to load.
+# ----------------------------------------------------------------------------
+
+def detect_checkpoint_arch(ckpt_path) -> str:
+    """Return "dual" or "modern" from the npz structure; raise otherwise."""
+    z = np.load(ckpt_path, allow_pickle=False)
+    keys = set(z.files)
+    if "meta_json" in keys:
+        return "dual"
+    if "cfg" in keys and any(k.startswith("param::") for k in keys):
+        return "modern"
+    raise ValueError(f"unknown checkpoint format: {ckpt_path} "
+                     f"(keys: {sorted(keys)[:8]})")
+
+
+def load_dual_model(ckpt_path):
+    """Dual-format checkpoint -> (model, tok, step). Tokenizer comes from meta."""
+    model, ck = dtn.DualTransformerNP.load_checkpoint(str(ckpt_path))
+    meta = ck.get("meta", {}) if isinstance(ck, dict) else {}
+    tok = dtn.tokenizer_from_meta(meta)
+    step = int(meta.get("step", 0)) if isinstance(meta, dict) else 0
+    return model, tok, step
+
+
+def load_checkpoint(ckpt_path, corpus_path=None):
+    """Format-dispatching entry: (model, tok, step, arch).
+
+    Dual checkpoints load from meta alone; modern checkpoints need the corpus
+    (their tokenizer is rebuilt from it and checked against the file).
+    """
+    arch = detect_checkpoint_arch(ckpt_path)
+    if arch == "dual":
+        model, tok, step = load_dual_model(ckpt_path)
+        return model, tok, step, "dual"
+    if corpus_path is None:
+        raise ValueError("modern checkpoint requires a corpus path")
+    model, tok, step = load_modern_model(ckpt_path, corpus_path)
+    return model, tok, step, "modern"
+
+
+def select_checkpoint(base, ckpt="modern_ckpt.npz"):
+    """Checkpoint selection, dual first, in the existing fallback style.
+
+    Returns (path, arch). The default ckpt name keeps its old meaning: prefer
+    the SFT product when present, else the base checkpoint. An explicit ckpt
+    name is used as-is (arch detected when the file exists).
+    """
+    base = Path(base)
+    if ckpt == "modern_ckpt.npz":
+        for name, arch in (("dual_d128_sft.npz", "dual"),
+                           ("modern_ckpt_sft.npz", "modern"),
+                           ("modern_ckpt.npz", "modern")):
+            p = base / name
+            if p.exists():
+                return p, arch
+    p = base / ckpt
+    return p, detect_checkpoint_arch(p) if p.exists() else "modern"
+
+
+# ----------------------------------------------------------------------------
 # Tools. Inputs and outputs use Chinese characters that the corpus contains.
 # ----------------------------------------------------------------------------
 
@@ -420,13 +482,14 @@ def _roundtrip_ok(tok, s):
 def runtime_test(corpus="Xiyouji.txt", ckpt="modern_ckpt.npz"):
     import tempfile
     base = Path(__file__).resolve().parent
-    # Prefer the SFT checkpoint when it exists (device acceptance passed 2026-10-24);
-    # fall back to the base checkpoint on a fresh checkout without one.
-    ckpt_path = base / ckpt
-    if ckpt == "modern_ckpt.npz" and (base / "modern_ckpt_sft.npz").exists():
-        ckpt_path = base / "modern_ckpt_sft.npz"
-    print(f"runtime_test using checkpoint: {ckpt_path.name}")
-    model, tok, _ = load_modern_model(ckpt_path, base / corpus)
+    # Dual SFT product first (dual path, no corpus needed), then the modern SFT
+    # checkpoint (device acceptance passed 2026-10-24), then the base checkpoint.
+    ckpt_path, arch = select_checkpoint(base, ckpt)
+    print(f"runtime_test using checkpoint: {ckpt_path.name} (arch: {arch})")
+    if arch == "dual":
+        model, tok, _ = load_dual_model(ckpt_path)
+    else:
+        model, tok, _ = load_modern_model(ckpt_path, base / corpus)
     chars_ok = "".join(sorted(set(
         Protocol().reserved_chars() + "计算回忆记住二加三五答案是六七除乘点零一")))
     assert all(c in tok.chars for c in chars_ok), "test characters must exist in the corpus"
