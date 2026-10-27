@@ -47,6 +47,31 @@ def _selection_tests():
     print("selection order (dual first): PASS")
 
 
+def _selection_detection_tests():
+    # 真实文件按结构探测，不再只看文件名：dual 权重即使叫 modern_ckpt.npz
+    # 也必须报 dual（2026-10-26 仓库 modern_ckpt.npz 换成 d128 完整检查点后
+    # 暴露的问题）；modern 文件仍报 modern。空文件沿用 _selection_tests
+    # 的文件名默认值（加载时才报错），此处不覆盖。
+    import shutil
+    if not PRODUCT.exists():
+        print("selection detection (real files): SKIP (no dual product)")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        shutil.copy(PRODUCT, base / "modern_ckpt.npz")
+        p, arch = ar.select_checkpoint(base)
+        assert p.name == "modern_ckpt.npz" and arch == "dual", (p, arch)
+    modern = MIRROR / "modern_ckpt.npz"
+    if modern.exists():
+        assert ar.detect_checkpoint_arch(modern) == "modern"
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            shutil.copy(modern, base / "modern_ckpt.npz")
+            p, arch = ar.select_checkpoint(base)
+            assert p.name == "modern_ckpt.npz" and arch == "modern", (p, arch)
+    print("selection detection (real files): PASS")
+
+
 def _format_tests():
     # 结构未知的文件必须报错，而不是被误认成某一架构。
     with tempfile.TemporaryDirectory() as td:
@@ -85,6 +110,7 @@ def _dual_load_and_agent_tests():
 
 def main():
     _selection_tests()
+    _selection_detection_tests()
     _format_tests()
     _dual_load_and_agent_tests()
     print("ALL DUAL RUNTIME TESTS PASSED")

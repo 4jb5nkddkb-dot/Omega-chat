@@ -160,6 +160,10 @@ def select_checkpoint(base, ckpt="modern_ckpt.npz"):
     Returns (path, arch). The default ckpt name keeps its old meaning: prefer
     the SFT product when present, else the base checkpoint. An explicit ckpt
     name is used as-is (arch detected when the file exists).
+    The fallback labels are only defaults: when a candidate file exists and
+    its format is readable, the detected arch wins, so a dual checkpoint
+    named modern_ckpt.npz no longer reports as modern. An unreadable file
+    keeps the name-based label and fails at load time, as before.
     """
     base = Path(base)
     if ckpt == "modern_ckpt.npz":
@@ -168,6 +172,10 @@ def select_checkpoint(base, ckpt="modern_ckpt.npz"):
                            ("modern_ckpt.npz", "modern")):
             p = base / name
             if p.exists():
+                try:
+                    arch = detect_checkpoint_arch(p)
+                except Exception:
+                    pass
                 return p, arch
     p = base / ckpt
     return p, detect_checkpoint_arch(p) if p.exists() else "modern"
