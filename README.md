@@ -17,6 +17,9 @@ modern_ckpt.npz             注意：文件名是旧名字，里面现在是 dua
                             （d128，step 69000，best val 4.6361，含优化器状态）
 dual_d128_s69000_params.npz.b64.part00-05
                             dual 参数-only 检查点的 base64 分片，拼回方法见下
+dual_d128_sft_world4.npz.b64.part00-05
+                            世界 SFT 第四轮产物（clean 单段 2000 步，val 4.7059，
+                            各轮世界产物中 val 最好），base64 分片，拼回方法见下
 xiyouji_modern_trainer*.zip 早期训练包存档
 tests/                      全部测试（dual_runtime / agent_governance /
                             world_state / omega_governance）
@@ -39,6 +42,8 @@ archive/                    旧代码与实验残留（omega.py、app.py、Ui.py
 ```
 cat dual_d128_s69000_params.npz.b64.part* > dual_d128_s69000_params.npz.b64
 base64 -d dual_d128_s69000_params.npz.b64 > dual_d128_s69000_params.npz
+cat dual_d128_sft_world4.npz.b64.part* > dual_d128_sft_world4.npz.b64
+base64 -d dual_d128_sft_world4.npz.b64 > dual_d128_sft_world4.npz
 ```
 
 ## 测试
