@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+现代架构直跑训练 — GQA + SwiGLU + RMSNorm + RoPE，纯 NumPy，无 UI。
+
+在 Pythonista 里直接运行本文件即可（没有 ui / present，不会闪退那一套）。
+依赖（同目录）：modern_transformer_numpy.py / dual_transformer_numpy.py
+（只借它的 CharTokenizer 和 AdamW 等工具）/ Xiyouji.txt。不需要 numba。
+
+用法：
+- 直接运行 = 按下面 CONFIG 训练
+- 命令行微调/续跑： python train_modern.py [本次增训步数] [d_model] [resume]
+  例： python train_modern.py 1000 64 resume   /   python train_modern.py steps=2000 resume
+- 检查点： modern_ckpt.npz（参数 + 配置 + 词表），resume 可续跑。
+"""
+from __future__ import annotations
+
+import sys
+import time
+import traceback
+from pathlib import Path
+
+import numpy as np
+
+BASE = Path(__file__).resolve().parent
+if str(BASE) not in sys.path:
+    sys.path.insert(0, str(BASE))
+
+LOG_PATH = BASE / "boot_log.txt"
+_t0 = time.time()
+
+CONFIG = {
+    "steps": 1000,        # 每次运行“增训”的步数（例如想再跑 1000 步就写 1000）
+    "d_model": 64,
+    "blocks": 2,
+    "q_heads": 4,
+    "kv_heads": 2,
+    "batch_size": 8,
+    "seq_len": 64,
+    "lr": 3e-3,
+    "warmup_steps": 20,
+    "weight_decay": 0.01,
+    "max_grad_norm": 1.0,
+    "eval_every": 50,
+    "seed": 42,
+    "resume": True,       # 默认开启续跑：只要有检查点就会自动接着训
+    "prompt": "悟空",
+    "new_tokens": 80,
+}
+
+CKPT = BASE / "modern_ckpt.npz"
+
+
+def log(msg: str) -> None:
+    line = f"[modern {time.time() - _t0:7.3f}s] {msg}"
+    print(line, flush=True)
+    try:
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+            f.flush()
+    except Exception:
+        pass
+
+
+def save_ckpt(model, tok, cfg, total_trained_steps, val):
+    data = {f"param::{k}": v for k, v in model.params.items()}
+    data["chars"] = np.asarray(tok.chars)
+    # 存储时把累计总步数记录在第 5 位
+    data["cfg"] = np.asarray([cfg["d_model"], cfg["blocks"], cfg["q_heads"],
+                              cfg["kv_heads"], model.vocab_size, total_trained_steps])
+    data["val"] = np.asarray([val])
+    np.savez(CKPT, **data)
+
+
+def main() -> None:
+    cfg = dict(CONFIG)
+    argv = [a for a in sys.argv[1:] if a]
+    for a in list(argv):  # 支持 key=value 形式覆盖，如 steps=2000 lr=0.001
+        if "=" in a:
+            k, v = a.split("=", 1)
+            if k in cfg:
+                # 保持原类型转换
+                cfg[k] = type(cfg[k])(v) if k != "resume" else (v.lower() == "true")
+                argv.remove(a)
+    
+    nums = [a for a in argv if a.isdigit()]
+    if len(nums) >= 1:
+        cfg["steps"] = int(nums[0])  # 第一个纯数字参数代表本次增训步数
+    if len(nums) >= 2:
+        cfg["d_model"] = int(nums[1])
+    if "resume" in argv:
+        cfg["resume"] = True
+
+    import numpy as np
+    from dual_transformer_numpy import (AdamWNP, CharTokenizer, clip_grad_norm,
+                                        evaluate_loss, lr_at, make_batch)
+    from modern_transformer_numpy import ModernTransformerNumpy
+
+    log("=== 现代架构训练启动（GQA+SwiGLU+RMSNorm+RoPE，纯NumPy） ===")
+    text = (BASE / "Xiyouji.txt").read_text(encoding="utf-8").replace("\r\n", "\n")
+    tok = CharTokenizer.from_text(text)
+    ids = np.asarray(tok.encode(text, add_bos=True, add_eos=True), dtype=np.int64)
+    split = int(len(ids) * 0.95)
+    train_ids, val_ids = ids[:split], ids[split:]
+    log(f"词表={tok.vocab_size} 训练token={len(train_ids)} 验证token={len(val_ids)}")
+
+    model = ModernTransformerNumpy(d_model=cfg["d_model"], n_blocks=cfg["blocks"],
+                                   n_q_heads=cfg["q_heads"], n_kv_heads=cfg["kv_heads"],
+                                   vocab_size=tok.vocab_size, seed=cfg["seed"])
+    
+    start_step = 0
+    if cfg["resume"] and CKPT.exists():
+        z = np.load(CKPT, allow_pickle=False)
+        saved_cfg = z["cfg"]
+        if int(saved_cfg[4]) == tok.vocab_size and int(saved_cfg[0]) == cfg["d_model"]:
+            for k in model.params:
+                model.params[k] = z[f"param::{k}"]
+            start_step = int(saved_cfg[5])
+            log(f"已成功加载检查点：从第 {start_step} 步继续续跑")
+        else:
+            log("检查点配置与当前不符，忽略续跑，从头训练")
+            
+    log(f"参数量={model.num_params():,} 配置: d={cfg['d_model']} blocks={cfg['blocks']} "
+        f"q/kv头={cfg['q_heads']}/{cfg['kv_heads']} batch={cfg['batch_size']} seq={cfg['seq_len']} "
+        f"lr={cfg['lr']} 本次增训步数={cfg['steps']}")
+
+    rng = np.random.default_rng(cfg["seed"])
+    opt = AdamWNP(model.params, lr=cfg["lr"], weight_decay=cfg["weight_decay"])
+    
+    val0 = evaluate_loss(model, val_ids, cfg["seq_len"], max_batches=20)
+    log(f"当前验证 loss = {val0:.4f}")
+    best_val, best_params = val0, None
+
+    # 目标总步数 = 起始步数 + 本次增训步数
+    target_steps = start_step + cfg["steps"]
+    t_start = time.time()
+    
+    for step in range(start_step + 1, target_steps + 1):
+        # 学习率衰减以整体目标步数为参考，或者以本次相对进度为参考（这里用相对增训进度更平滑）
+        relative_step = step - start_step
+        opt.lr = lr_at(relative_step, cfg["lr"], "cosine",
+                       cfg["warmup_steps"], cfg["steps"])
+                       
+        x, y = make_batch(train_ids, cfg["batch_size"], cfg["seq_len"], rng)
+        loss, grads = model.loss_and_grads(x, y)
+        gn = clip_grad_norm(grads, cfg["max_grad_norm"])
+        opt.step(model.params, grads)
+        
+        if step % 20 == 0 or step == start_step + 1:
+            log(f"step {step}/{target_steps} train loss={loss:.4f} |grad|={gn:.2f} lr={opt.lr:.5f} "
+                f"({time.time() - t_start:.1f}s)")
+                
+        if step % cfg["eval_every"] == 0 or step == target_steps:
+            val = evaluate_loss(model, val_ids, cfg["seq_len"], max_batches=20)
+            log(f"step {step} 验证 loss = {val:.4f}（基准 {val0:.4f}）")
+            if val < best_val:
+                best_val = val
+                best_params = {k: v.copy() for k, v in model.params.items()}
+                save_ckpt(model, tok, cfg, step, val)
+                log(f"  ↑ 新最佳，已更新保存至 {CKPT.name}")
+                
+    total_t = time.time() - t_start
+    if best_params is not None:
+        model.params = best_params
+        
+    log(f"本次训练完成：增训 {cfg['steps']} 步，总计已训练至第 {target_steps} 步。"
+        f"用时 {total_t:.1f}s，最佳验证 loss = {best_val:.4f}")
+
+    prompt_ids = tok.encode(cfg["prompt"], add_bos=True)
+    gen = model.generate(prompt_ids, max_new=cfg["new_tokens"],
+                         temperature=0.8, top_p=0.95, seed=1)
+    log(f"生成示例（prompt={cfg['prompt']!r}，温度0.8/top-p0.95）：")
+    print(tok.decode(gen), flush=True)
+    
+    gen_greedy = model.generate(prompt_ids, max_new=40, temperature=0)
+    log("生成示例（greedy）：")
+    print(tok.decode(gen_greedy), flush=True)
+    log("=== 全部完成 ===")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        log("⏹ 被手动停止：最佳检查点在 modern_ckpt.npz，下次直接运行可继续续跑")
+    except Exception:
+        log("❌ 失败:\n" + traceback.format_exc())
+        raise

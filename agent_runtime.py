@@ -97,6 +97,10 @@ def generate_segment(model, ids, max_new, *, temperature=0.0, rng=None, controll
 
 def load_modern_model(ckpt_path, corpus_path):
     """Rebuild the trainer's model and tokenizer exactly as train_modern.py does."""
+    import sys
+    legacy = Path(__file__).resolve().parent / "legacy"
+    if legacy.is_dir() and str(legacy) not in sys.path:
+        sys.path.insert(0, str(legacy))
     from modern_transformer_numpy import ModernTransformerNumpy
     text = Path(corpus_path).read_text(encoding="utf-8").replace("\r\n", "\n")
     tok = dtn.CharTokenizer.from_text(text)
