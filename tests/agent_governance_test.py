@@ -159,6 +159,67 @@ def test_paused_blocks_all(tmp: Path, tok) -> None:
     print("paused blocks all: PASS")
 
 
+def test_console_provider_yes(tmp: Path, tok) -> None:
+    """方案 A：控制台回答 y 时发一次性令牌，记住放行并写入，且提示含动作与内容。"""
+    store = MemoryStore(tmp / "m_console_yes.jsonl")
+    router = ar.ToolRouter(make_memory_tools(store), tok)
+    gov = Governance(tmp / "gov_console_yes")
+    printed = []
+    provider = ar.make_console_token_provider(
+        gov.owner_auth, input_fn=lambda _prompt: "y",
+        print_fn=printed.append)
+    scripts = [f"{P.call_open}记住{P.name_end}不加糖{P.call_close}", "记下了"]
+    res = ar.run_agent(ar.ScriptedLM(tok, list(scripts)), router,
+                       "记住不加糖", ar.contains_verifier("记下了"),
+                       governance=gov, token_provider=provider)
+    assert res.ok and res.text == "记下了", res.events
+    assert len(store.records) == 1 and store.records[0]["text"] == "不加糖"
+    assert _audit(gov, kind="tool_exec", decision="ALLOW", action="记住")
+    shown = "\n".join(printed)
+    assert "记住" in shown and "不加糖" in shown, shown
+    _chain_ok(gov)
+    print("console provider yes: PASS")
+
+
+def test_console_provider_no(tmp: Path, tok) -> None:
+    """方案 A：控制台回答 n 时不发令牌，记住被拒、整轮 denied、存储为空。"""
+    store = MemoryStore(tmp / "m_console_no.jsonl")
+    router = ar.ToolRouter(make_memory_tools(store), tok)
+    gov = Governance(tmp / "gov_console_no")
+    provider = ar.make_console_token_provider(
+        gov.owner_auth, input_fn=lambda _prompt: "n",
+        print_fn=lambda _line: None)
+    scripts = [f"{P.call_open}记住{P.name_end}不加糖{P.call_close}", "记下了"]
+    res = ar.run_agent(ar.ScriptedLM(tok, list(scripts)), router,
+                       "记住不加糖", ar.contains_verifier("记下了"),
+                       governance=gov, token_provider=provider)
+    assert not res.ok and _denials(res), res.events
+    assert store.records == []
+    assert _audit(gov, kind="tool_exec", decision="DENY", action="记住")
+    _chain_ok(gov)
+    print("console provider no: PASS")
+
+
+def test_console_provider_eof(tmp: Path, tok) -> None:
+    """方案 A：控制台输入 EOF 时不发令牌（不抛错），记住被拒。"""
+    def _eof(_prompt):
+        raise EOFError
+
+    store = MemoryStore(tmp / "m_console_eof.jsonl")
+    router = ar.ToolRouter(make_memory_tools(store), tok)
+    gov = Governance(tmp / "gov_console_eof")
+    provider = ar.make_console_token_provider(
+        gov.owner_auth, input_fn=_eof, print_fn=lambda _line: None)
+    scripts = [f"{P.call_open}记住{P.name_end}不加糖{P.call_close}", "记下了"]
+    res = ar.run_agent(ar.ScriptedLM(tok, list(scripts)), router,
+                       "记住不加糖", ar.contains_verifier("记下了"),
+                       governance=gov, token_provider=provider)
+    assert not res.ok and _denials(res), res.events
+    assert store.records == []
+    _chain_ok(gov)
+    print("console provider eof: PASS")
+
+
 def test_no_governance_unchanged(tmp: Path, tok) -> None:
     """governance=None 时行为与原来完全一致（含工具 + 拒绝回滚的多回合循环）。"""
     scripts = [f"{P.call_open}计算{P.name_end}二加三{P.call_close}", "答案是六", "答案是五"]
@@ -185,6 +246,9 @@ def main() -> None:
         test_memory_gate_second_door(tmp, tok)
         test_paused_blocks_all(tmp, tok)
         test_no_governance_unchanged(tmp, tok)
+        test_console_provider_yes(tmp, tok)
+        test_console_provider_no(tmp, tok)
+        test_console_provider_eof(tmp, tok)
     print("ALL GOVERNANCE WIRING TESTS PASSED")
 
 

@@ -350,6 +350,27 @@ def contains_verifier(expected: str) -> Callable[[str], tuple]:
 MEMORY_WRITE_ACTIONS = frozenset({"记住"})
 
 
+def make_console_token_provider(owner_auth, *, input_fn=input, print_fn=print):
+    """交互式确认通道（方案 A）：需确认动作到达时，打印动作与内容并
+    input() 问 y/n；回答 y（/yes/是）才发一次性令牌，其它回答或 EOF
+    返回 None，调用方按 denied 结束整轮并审计。
+
+    owner_auth 只需 .issue_token(action, arg)（omega_governance.OwnerAuth
+    的接口）；本函数不 import omega_governance，ungoverned 路径保持零依赖。
+    input_fn/print_fn 可注入，便于测试与非控制台调用方复用。
+    """
+    def provider(action, arg):
+        print_fn(f"需要确认：{action}（{arg}）")
+        try:
+            ans = input_fn("确认执行？(y/n) ").strip().lower()
+        except EOFError:
+            return None
+        if ans in ("y", "yes", "是"):
+            return owner_auth.issue_token(action, arg)
+        return None
+    return provider
+
+
 def _run_governed_tool(router: ToolRouter, text: str, governance,
                        token_provider) -> tuple:
     """One governed tool turn, mirroring ToolRouter.dispatch's visible outcomes.
@@ -567,8 +588,48 @@ def runtime_test(corpus="Xiyouji.txt", ckpt="modern_ckpt.npz"):
           f"real-model events={[e[0] for e in res2.events]}")
 
 
+def console_main():
+    """交互式控制台入口（方案 A）：治理默认开启，记住类动作现问现答。
+
+    库函数 run_agent 的 governance=None 默认保持不变；只有这个交互入口
+    默认构造 Governance + 控制台确认通道。空行或 EOF 退出。审计与控制台
+    记忆都落在 ~/.omega_governance（不写进仓库目录）。
+    """
+    import os
+    from pathlib import Path
+
+    from memory_store import MemoryStore, make_memory_tools
+    from omega_governance import Governance
+
+    base = Path(__file__).resolve().parent
+    ckpt_path, _arch = select_checkpoint(base)
+    model, tok, step, arch = load_checkpoint(ckpt_path, base / "Xiyouji.txt")
+    print(f"已加载 {ckpt_path.name}（{arch}，step={step}）；"
+          f"治理默认开启，记住需现问现答。")
+    gov_dir = Path(os.path.expanduser("~/.omega_governance"))
+    gov = Governance(gov_dir)
+    provider = make_console_token_provider(gov.owner_auth)
+    store = MemoryStore(gov_dir / "console_memory.jsonl")
+    router = ToolRouter({"计算": calc_zh, **make_memory_tools(store)}, tok)
+    while True:
+        try:
+            prompt = input("你说：").strip()
+        except EOFError:
+            break
+        if not prompt:
+            break
+        res = run_agent(model, router, prompt, lambda text: (True, ""),
+                        governance=gov, token_provider=provider)
+        for e in res.events:
+            if e and e[0] == "denied":
+                print(f"已拒绝：{e[1]}（{e[2]}）：{e[3]}")
+        print(res.text)
+
+
 if __name__ == "__main__":
     import sys
     if "--test" in sys.argv:
         runtime_test()
         print("AGENT RUNTIME TESTS PASSED")
+    elif "--console" in sys.argv:
+        console_main()
