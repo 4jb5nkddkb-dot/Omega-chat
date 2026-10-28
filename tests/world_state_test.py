@@ -14,13 +14,13 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 ROOT = _HERE.parent if _HERE.name in ("tests", "tools", "legacy") else _HERE
 
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
 
 import numpy as np
 
-import agent_runtime as ar
-import dual_transformer_numpy as dtn
-from world_state import (CHARACTERS, ITEMS, LOCATIONS, WorldState,
+from omega_chat import agent_runtime as ar
+from omega_chat import dual_transformer_numpy as dtn
+from omega_chat.world_state import (CHARACTERS, ITEMS, LOCATIONS, WorldState,
                          int_to_zh, world_prompt)
 
 PRODUCT = Path(os.path.expanduser("~/workspace/dual_sft/out/dual_d128_sft.npz"))

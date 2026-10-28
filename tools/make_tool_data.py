@@ -10,7 +10,7 @@ Output: a JSONL file. Each record has
 Characters are one token each with CharTokenizer, so spans map directly to token positions.
 
 Usage:
-  python make_tool_data.py                      # writes protocol_sft.jsonl
+  python make_tool_data.py                      # writes data/protocol_sft.jsonl
   python make_tool_data.py --n 400 --seed 1
   python make_tool_data.py --test
 """
@@ -27,9 +27,9 @@ import numpy as np
 _HERE = Path(__file__).resolve().parent
 ROOT = _HERE.parent if _HERE.name in ("tests", "tools", "legacy") else _HERE
 import sys
-sys.path.insert(0, str(ROOT))
-from agent_runtime import Protocol, ToolRouter, calc_zh, load_modern_model
-from memory_store import MemoryStore, make_memory_tools
+sys.path.insert(0, str(ROOT / "src"))
+from omega_chat.agent_runtime import Protocol, ToolRouter, calc_zh, load_modern_model
+from omega_chat.memory_store import MemoryStore, make_memory_tools
 
 P = Protocol()
 BASE = ROOT
@@ -102,7 +102,7 @@ def build_samples(n_calc=200, n_mem=100, seed=0):
 
 
 def load_tokenizer():
-    _, tok, _ = load_modern_model(BASE / "modern_ckpt.npz", BASE / "Xiyouji.txt")
+    _, tok, _ = load_modern_model(BASE / "checkpoints" / "modern_ckpt.npz", BASE / "data" / "Xiyouji.txt")
     return tok
 
 
@@ -173,7 +173,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=300, help="calc samples (memory samples are n/2)")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--out", type=str, default="protocol_sft.jsonl")
+    ap.add_argument("--out", type=str, default="data/protocol_sft.jsonl")
     ap.add_argument("--test", action="store_true")
     args = ap.parse_args()
     if args.test:

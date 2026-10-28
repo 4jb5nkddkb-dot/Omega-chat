@@ -2,12 +2,12 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 ROOT = _HERE.parent if _HERE.name in ("tests", "tools", "legacy") else _HERE
 import sys
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
 import numpy as np
-from agent_runtime import load_modern_model, generate_segment
-import dual_transformer_numpy as dtn
+from omega_chat.agent_runtime import load_modern_model, generate_segment
+from omega_chat import dual_transformer_numpy as dtn
 
-model, tok, step = load_modern_model(ROOT / "modern_ckpt.npz", ROOT / "Xiyouji.txt")
+model, tok, step = load_modern_model(ROOT / "checkpoints" / "modern_ckpt.npz", ROOT / "data" / "Xiyouji.txt")
 print("checkpoint step:", step, "vocab:", tok.vocab_size)
 prompt = tok.encode("悟空", add_bos=True)
 

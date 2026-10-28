@@ -15,18 +15,18 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 ROOT = _HERE.parent if _HERE.name in ("tests", "tools", "legacy") else _HERE
 
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
 
-import agent_runtime as ar
-import dual_transformer_numpy as dtn
-from memory_store import MemoryStore, make_memory_tools
-from omega_governance import Governance
+from omega_chat import agent_runtime as ar
+from omega_chat import dual_transformer_numpy as dtn
+from omega_chat.memory_store import MemoryStore, make_memory_tools
+from omega_chat.omega_governance import Governance
 
 P = ar.Protocol()
 
 
 def _tok():
-    text = (ROOT / "Xiyouji.txt").read_text(encoding="utf-8")
+    text = (ROOT / "data" / "Xiyouji.txt").read_text(encoding="utf-8")
     return dtn.CharTokenizer.from_text(text.replace("\r\n", "\n"))
 
 

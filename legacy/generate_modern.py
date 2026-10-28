@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-从 modern_ckpt.npz 加载已训练的现代架构模型并生成文本（纯 NumPy，无 UI）。
+从 checkpoints/modern_ckpt.npz 加载已训练的现代架构模型并生成文本（纯 NumPy，无 UI）。
 用法：直接运行 = 用默认 prompt「悟空」生成；或 python generate_modern.py [prompt] [个数]
 """
 from __future__ import annotations
@@ -15,16 +15,16 @@ import numpy as np
 
 BASE = ROOT
 if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
+    sys.path.insert(0, str(BASE / "src"))
 
 
 def main() -> None:
-    from dual_transformer_numpy import CharTokenizer
+    from omega_chat.dual_transformer_numpy import CharTokenizer
     from modern_transformer_numpy import ModernTransformerNumpy
 
-    ckpt = BASE / "modern_ckpt.npz"
+    ckpt = BASE / "checkpoints" / "modern_ckpt.npz"
     if not ckpt.exists():
-        print("找不到 modern_ckpt.npz，请先运行 train_modern.py 训练一次")
+        print("找不到 checkpoints/modern_ckpt.npz，请先运行 train_modern.py 训练一次")
         return
     argv = [a for a in sys.argv[1:] if a]
     prompt = argv[0] if len(argv) >= 1 else "悟空"

@@ -15,11 +15,11 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 ROOT = _HERE.parent if _HERE.name in ("tests", "tools", "legacy") else _HERE
 
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
 
 import numpy as np
 
-import agent_runtime as ar
+from omega_chat import agent_runtime as ar
 
 MIRROR = ROOT
 PRODUCT = Path(os.environ.get(

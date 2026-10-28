@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omega-chat"
+version = "0.1.0"
+description = "本地小型智能体练手仓库：纯 NumPy 双头 Transformer + Omega 门控 + agent 运行时"
+requires-python = ">=3.10"
+dependencies = ["numpy"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

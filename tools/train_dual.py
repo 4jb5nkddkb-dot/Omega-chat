@@ -3,7 +3,7 @@
 """
 合并版双头的直跑训练脚本 —— 无 UI,Pythonista 里直接运行即可。
 
-依赖(同目录):dual_transformer_numpy.py(合并版)/ Xiyouji.txt。
+依赖：src/omega_chat/dual_transformer_numpy.py（合并版）/ data/Xiyouji.txt。
 和 train_modern.py 一样的用法:改下方 CONFIG,或 key=value 覆盖。
 
 默认配方 = “现代味”(实测与现代架构同尺度打平):
@@ -35,7 +35,7 @@ import numpy as np
 
 BASE = ROOT
 if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
+    sys.path.insert(0, str(BASE / "src"))
 
 LOG_PATH = BASE / "boot_log.txt"
 _t0 = time.time()
@@ -94,12 +94,12 @@ def main() -> None:
                     cfg[k] = type(cfg[k])(v)
                 argv.remove(a)
 
-    from dual_transformer_numpy import (CharTokenizer, DecodeController,
+    from omega_chat.dual_transformer_numpy import (CharTokenizer, DecodeController,
                                         DualTransformerNP, last_checkpoint_path,
                                         train_steps)
 
     log("=== 合并版双头直跑训练启动 ===")
-    text = (BASE / "Xiyouji.txt").read_text(encoding="utf-8").replace("\r\n", "\n")
+    text = (BASE / "data" / "Xiyouji.txt").read_text(encoding="utf-8").replace("\r\n", "\n")
     tok = CharTokenizer.from_text(text)
     ids = np.asarray(tok.encode(text, add_bos=True, add_eos=True), dtype=np.int64)
     split = int(len(ids) * 0.95)

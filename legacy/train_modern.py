@@ -3,7 +3,7 @@
 """
 现代架构训练 —— GQA + SwiGLU + RMSNorm + RoPE,纯 NumPy。
 
-依赖(同目录):modern_transformer_numpy.py / dual_transformer_numpy.py / Xiyouji.txt
+依赖：legacy/modern_transformer_numpy.py / src/omega_chat/dual_transformer_numpy.py / data/Xiyouji.txt
 
 改进要点:
 1. 检查点分两份:
@@ -42,11 +42,11 @@ ROOT = _HERE.parent if _HERE.name in ("tests", "tools", "legacy") else _HERE
 
 BASE = ROOT
 if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
+    sys.path.insert(0, str(BASE / "src"))
 
 LOG_PATH = BASE / "boot_log.txt"
-LAST_CKPT = BASE / "modern_ckpt_last.npz"
-BEST_CKPT = BASE / "modern_ckpt_best.npz"
+LAST_CKPT = BASE / "checkpoints" / "modern_ckpt_last.npz"
+BEST_CKPT = BASE / "checkpoints" / "modern_ckpt_best.npz"
 LEGACY_CKPT = BASE / "modern_ckpt.npz"  # 旧版检查点,仅用于兼容读取
 
 CONFIG = {
@@ -67,7 +67,7 @@ CONFIG = {
     "patience": 0,           # 连续多少次评估无改善就早停;0 = 关闭
     "seed": 42,
     "resume": True,          # 默认续跑:有检查点就接着训
-    "text_file": "Xiyouji.txt",
+    "text_file": "data/Xiyouji.txt",
     "prompt": "菩提祖师",
     "new_tokens": 128,
 }
@@ -285,7 +285,7 @@ def generate_samples(model, tok, cfg: dict, params: dict) -> None:
 def main(argv: list[str]) -> None:
     cfg, flags = parse_args(argv)
 
-    from dual_transformer_numpy import AdamWNP, CharTokenizer, clip_grad_norm, evaluate_loss, make_batch
+    from omega_chat.dual_transformer_numpy import AdamWNP, CharTokenizer, clip_grad_norm, evaluate_loss, make_batch
     from modern_transformer_numpy import ModernTransformerNumpy
 
     log("=== 现代架构训练启动(GQA+SwiGLU+RMSNorm+RoPE,纯NumPy) ===")
@@ -460,7 +460,7 @@ if __name__ == "__main__":
     try:
         main(sys.argv[1:])
     except KeyboardInterrupt:
-        log("⏹ 被手动停止:进度已保存到 modern_ckpt_last.npz,直接运行即可续跑")
+        log("⏹ 被手动停止:进度已保存到 checkpoints/modern_ckpt_last.npz,直接运行即可续跑")
     except SystemExit:
         raise
     except Exception:

@@ -19,9 +19,9 @@ ROOT = _HERE.parent if _HERE.name in ("tests", "tools", "legacy") else _HERE
 
 import numpy as np
 
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
 
-from omega_governance import (  # noqa: E402
+from omega_chat.omega_governance import (  # noqa: E402
     ALLOW, BROKEN, DENY, HOLD, RELEASE, AuditLog, CheckpointGate, Governance,
     MemoryGate, OwnerAuth, Policy, Rollback, ToolGate,
 )

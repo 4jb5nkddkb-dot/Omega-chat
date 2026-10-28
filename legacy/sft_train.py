@@ -2,15 +2,15 @@
 # -*- coding: utf-8 -*-
 """sft_train.py — 协议 SFT 训练器（设备版，配方已在本地替身检查点上全量验证）
 
-做什么：从 modern_ckpt.npz 续训，让模型学会工具协议——自发发出
+做什么：从 checkpoints/modern_ckpt.npz 续训，让模型学会工具协议——自发发出
 《计算》/《记住》/《回忆》调用、把题面操作数原样抄进调用、读回工具
 结果作答。训练完自带验收（三例 + 两探针 + 162 组合抄写探针）。
 
-同目录需要（仓库文件）：modern_transformer_numpy.py、dual_transformer_numpy.py、
-agent_runtime.py、make_tool_data.py、memory_store.py、Xiyouji.txt、modern_ckpt.npz
+需要（仓库文件）：legacy/modern_transformer_numpy.py、src/omega_chat/dual_transformer_numpy.py、
+src/omega_chat/agent_runtime.py、tools/make_tool_data.py、src/omega_chat/memory_store.py、data/Xiyouji.txt、checkpoints/modern_ckpt.npz
 
-安全：开训前自动把 modern_ckpt.npz 复制为 modern_ckpt_v1_backup.npz 并打印
-sha256（已存在则不覆盖）；成果写 modern_ckpt_sft.npz，绝不覆盖原检查点。
+安全：开训前自动把 checkpoints/modern_ckpt.npz 复制为 checkpoints/modern_ckpt_v1_backup.npz 并打印
+sha256（已存在则不覆盖）；成果写 checkpoints/modern_ckpt_sft.npz，绝不覆盖原检查点。
 
 配方（v5 定版，v4 + 答案复制值加权）：记录对齐采样（问题与调用同窗）、
 加权 masked loss（操作数 ×5 / 调用其余 ×2 / 答案模板 ×2 / 答案中被复制
@@ -35,16 +35,17 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 ROOT = _HERE.parent if _HERE.name in ("tests", "tools", "legacy") else _HERE
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tools"))
 
 import numpy as np
 
-import dual_transformer_numpy as dtn
+from omega_chat import dual_transformer_numpy as dtn
 import modern_transformer_numpy as mtn
-from agent_runtime import (Protocol, ToolRouter, calc_zh, contains_verifier,
+from omega_chat.agent_runtime import (Protocol, ToolRouter, calc_zh, contains_verifier,
                            generate_segment, load_modern_model, run_agent)
 from make_tool_data import build_samples, check_records
-from memory_store import MemoryStore, make_memory_tools
+from omega_chat.memory_store import MemoryStore, make_memory_tools
 
 BASE = ROOT
 CONFIG = dict(steps=2000, lr=5e-4, batch=8, seq=64, proto_share=0.5,
@@ -79,16 +80,16 @@ def build_weighted_loss():
 
 
 def archive_base_ckpt():
-    src = BASE / "modern_ckpt.npz"
-    bak = BASE / "modern_ckpt_v1_backup.npz"
-    assert src.exists(), "同目录缺少 modern_ckpt.npz"
+    src = BASE / "checkpoints" / "modern_ckpt.npz"
+    bak = BASE / "checkpoints" / "modern_ckpt_v1_backup.npz"
+    assert src.exists(), "缺少 checkpoints/modern_ckpt.npz"
     h = hashlib.sha256(src.read_bytes()).hexdigest()
     if bak.exists():
         print(f"[存档] 备份已存在，跳过：{bak.name}")
     else:
         shutil.copy2(src, bak)
         print(f"[存档] 已备份原检查点 -> {bak.name}")
-    print(f"[存档] modern_ckpt.npz sha256 = {h[:16]}...（完整值见 sft 报告）")
+    print(f"[存档] checkpoints/modern_ckpt.npz sha256 = {h[:16]}...（完整值见 sft 报告）")
     return h
 
 
@@ -199,8 +200,8 @@ def main():
     print(f"SFT 协议训练（设备版）配置：{cfg}")
     base_hash = archive_base_ckpt()
 
-    model, tok, step0 = load_modern_model(BASE / "modern_ckpt.npz", BASE / "Xiyouji.txt")
-    text = (BASE / "Xiyouji.txt").read_text(encoding="utf-8").replace("\r\n", "\n")
+    model, tok, step0 = load_modern_model(BASE / "checkpoints" / "modern_ckpt.npz", BASE / "data" / "Xiyouji.txt")
+    text = (BASE / "data" / "Xiyouji.txt").read_text(encoding="utf-8").replace("\r\n", "\n")
     all_ids = np.asarray(tok.encode(text, add_bos=True, add_eos=True), dtype=np.int64)
     split = int(len(all_ids) * 0.95)
     train_ids, val_ids = all_ids[:split], all_ids[split:]
@@ -248,7 +249,7 @@ def main():
                   f"已用 {el / 60:.1f} 分 剩约 {eta / 60:.1f} 分", flush=True)
             run_loss, nb = 0.0, 0
 
-    out = BASE / "modern_ckpt_sft.npz"
+    out = BASE / "checkpoints" / "modern_ckpt_sft.npz"
     v1 = val_loss(model, val_ids, cfg)
     payload = {f"param::{k}": v for k, v in model.params.items()}
     payload["cfg"] = np.asarray([64, 2, 4, 2, tok.vocab_size, step0 + cfg["steps"]])
@@ -257,7 +258,7 @@ def main():
     np.savez(out, **payload)
     print(f"已保存 {out.name}：西游记 val {v0:.4f} -> {v1:.4f}", flush=True)
 
-    model2, tok2, _ = load_modern_model(out, BASE / "Xiyouji.txt")
+    model2, tok2, _ = load_modern_model(out, BASE / "data" / "Xiyouji.txt")
     print("--- 训练后验收 ---", flush=True)
     cases = acceptance(model2, tok2, "训后")
     if cfg["probe"]:
@@ -272,7 +273,7 @@ def main():
     print("=" * 56)
     print(f"SFT 验收总结果：{'全部通过 ✓' if all_ok else '未全通 ✗（见上）'}"
           f"  基座 sha256={base_hash}")
-    print(f"成果文件：modern_ckpt_sft.npz（原检查点与备份未动）"
+    print(f"成果文件：checkpoints/modern_ckpt_sft.npz（原检查点与备份未动）"
           f"  总耗时 {(time.time() - t0) / 60:.1f} 分")
     print("=" * 56)
 
