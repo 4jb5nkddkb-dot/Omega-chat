@@ -1,85 +1,41 @@
-# Omega-chat
+# Omega-chat（全能线）
 
-本地小型智能体的练手仓库：纯 NumPy 双头 Transformer（《西游记》语料）+ Omega 门控 + agent 运行时。
-本仓库为 source of truth。双头为基准；modern 旧架构归档在 `legacy/`，仍可运行，但不再是主力。
+一个 d512 通用小模型，目标是全能型小强：什么都懂一点、什么都能试、
+什么都不精。学而不精是设计，不是失败。最终目标是用户自己的本地 agent，
+这个模型是通向它的练习件。
 
-## 布局（标准包布局）
+## 现在的状态（2026-11-11）
 
-```
-src/omega_chat/             包：双头 Transformer + agent 运行时 + 记忆 + 世界状态 + 治理 + 精简内核
-  dual_transformer_numpy.py 双头 Transformer（NumPy 参考实现）+ 解码控制
-  agent_runtime.py          闭环 agent 运行时：Protocol + ToolRouter + run_agent
-  memory_store.py           长期记忆：append-only JSONL 存储 + 记忆工具
-  world_state.py            小世界状态机：地点 / 人物 / 物品 / 时间
-  omega_governance.py       治理层：ToolGate / MemoryGate / CheckpointGate / 审计
-  omega_kernel_runnable.py  精简 Omega 内核（纯标准库，Pythonista 可跑）
-tests/                      全部测试（dual_runtime / agent_governance /
-                            world_state / omega_governance）
-tools/                      make_tool_data.py（协议 SFT 数据生成）、
-                            align_check.py（生成复读率 A/B）、train_dual.py
-legacy/                     modern 旧架构：modern_transformer_numpy.py、
-                            train_modern.py、sft_train.py（modern 配方，
-                            不能跑在 dual 基座上）
-docs/                       OMEGA_UNIFIED_DESIGN.md（治理层统一设计）
-data/                       Xiyouji.txt（训练语料，677,421 字，字表 4,510）
-checkpoints/                检查点（见下）
-archive/                    旧代码与实验残留（omega.py、app.py、Ui.py、
-                            GGUF.py 等）+ 历史 boot 日志，只移动不删除
-```
+- 正式轮按 300 步一块自动滚动：第 1–190 块完成，累计 57000 步，
+  最新产品 `s57000`，第 191 块进行中。
+- 常识域 2026-11-11 落地（A＋B 都加），配比自第 192 块起切回设计值。
+- 训练侧不设验收门禁，只训模型；治理侧（授权、审计）原样不动。
 
-```
-checkpoints/
-  base/                     dual 参数-only 检查点的 base64 分片
-    dual_d128_s69000_params.npz.b64.part00-05
-  world4/                   世界 SFT 第四轮产物的 base64 分片
-    dual_d128_sft_world4.npz.b64.part00-05
-```
+## 布局
 
-当前状态（2026-10-28 整理）：
-- 仓库里没有可直接加载的检查点文件，只有上面两组 base64 分片；
-  新 clone 需先按下一节拼出检查点，`select_checkpoint` 才能找到。
-- `modern_ckpt.npz`（旧名，内为 dual 权重 d128 / step 69000）与两个
-  trainer zip 已由仓库主人主动删除，git 历史里仍可找回。
-- 世界 SFT 第九轮产物 `dual_d128_sft_world9.npz`（世界循环当前产物，
-  全部验收门通过）目前仅本地，未进仓库。
+- `generalist/`：全能线训练管线——训练器、通用词表（4622）、语料、
+  设计稿与盘点、常识域出处。
+- `src/omega_chat/`：方法库——dual 模型（NumPy 实现）、治理层
+  （ToolGate/MemoryGate）、精简内核、世界状态。
+- `tests/`、`tools/`：治理与世界测试、工具数据生成。
+- `data/Xiyouji.txt`：经典域语料（公版）。
 
-权重是二进制文件，不走文本推送通道；分片是文本，可直接推送。
+## 混合配比（采样权重）
 
-## 权重分片拼回
+经典 25 / 代码 20 / 对话 20 / 常识 15 / 推理 10 / 世界 10。
+常识域：中文维基百科条目导言（CC BY-SA 4.0，见
+`generalist/generalist_corpus/knowledge_provenance.md`）＋
+《幼学琼林》（Project Gutenberg #52269，公有领域）；
+两者均按冻结的 4622 词表整句过滤，含词表外字的句子整句丢弃。
 
-```
-cat checkpoints/base/dual_d128_s69000_params.npz.b64.part* > dual_d128_s69000_params.npz.b64
-base64 -d dual_d128_s69000_params.npz.b64 > dual_d128_s69000_params.npz
-cat checkpoints/world4/dual_d128_sft_world4.npz.b64.part* > dual_d128_sft_world4.npz.b64
-base64 -d dual_d128_sft_world4.npz.b64 > dual_d128_sft_world4.npz
-```
+## 训练方式
 
-## 测试
+300 步一块，每块存自己的产品，下一块用 `--init` 只取参数热启动
+（优化器与学习率曲线全新）；被重启杀掉时用 `--resume` 从 25 步断点
+续跑。产品是 195 MB 的 `.npz`，不进仓库，只留在工作台。
 
-```
-python3 tests/dual_runtime_test.py
-python3 tests/agent_governance_test.py
-python3 tests/world_state_test.py
-python3 tests/omega_governance_test.py
-python3 src/omega_chat/agent_runtime.py --test
-python3 src/omega_chat/memory_store.py --test
-```
+## 旧线
 
-`--test` 与 `--console` 用 `select_checkpoint` 找检查点：每个名字先查
-`checkpoints/`，再查根目录，所以平铺目录也能跑。
-注意：新 clone 时仓库里只有分片，需先拼出检查点文件再跑测试。
-
-## 手机（Pythonista）平铺兼容
-
-仓库是标准包布局，但手机端仍可平铺运行：把 `src/omega_chat/` 下的
-文件与 `data/Xiyouji.txt`、检查点放在同一目录直接运行即可。
-`agent_runtime.py` 在包外运行时自动回落到同目录 sibling 导入；
-`select_checkpoint` 按 `checkpoints/` → 根目录的顺序找检查点；
-语料优先读 `data/Xiyouji.txt`，没有则读同目录 `Xiyouji.txt`。
-legacy 脚本运行时日志仍写根目录 `boot_log.txt`（不提交）。
-
-## 约定
-
-- 文件名一律用下划线（Python import 的要求）；不要用带空格的文件名
-- 工具协议保留字符只用西游记字表内字符：`《》】〔〕（）`（语料里没有半角括号、引号和 ASCII 标记）
-- 训练工作台（dual_sft/ 下的各轮训练脚本与产物）不在本仓库里，只推评审过的产物
+2026-10-30 已全部作废：旧权重已从磁盘物理删除，仓库里的旧权重
+分片也在这次重建中删除；git 历史里的 blob 保留，不重写历史。
+工作台是 live 运行时，仓库是快照记录；训练器里的绝对路径指向工作台。
