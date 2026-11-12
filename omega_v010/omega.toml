@@ -1,0 +1,18 @@
+# Omega v0.1.0 kernel config.
+# self_modify stays OFF: L1 computes nothing and commits nothing;
+# the loop still learns through strategy weights (grounded rewards
+# from the bridge), case memory and L2 soft nudges, all audited.
+autosave = true
+auto_checkpoint_on_patch = true
+error_threshold = 0.30
+min_steps_between_patches = 3
+max_risk = 0.65
+default_goal = "act coherently in the little world as Omega"
+self_modify_enabled = false
+dump_trajectory = true
+
+[intervention]
+mode = "exploration"
+max_level = "suggest_alternative"
+friction_threshold = 2
+audit_escalations = true
