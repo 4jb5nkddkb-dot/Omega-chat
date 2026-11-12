@@ -158,12 +158,14 @@ class WorldState:
         return [name for name in ITEMS if self.item_loc[name] == CARRIED]
 
     def summary(self) -> str:
-        """状态摘要：上下文携带的固定格式（只用词表内字符）。"""
-        return (f"世界状态。你在{self.visitor_location}。"
-                f"在场人物{_join(self.present_characters())}。"
+        """状态摘要：上下文携带的固定格式（只用词表内字符）。
+        地点压后（v9 修法 A）：让“你在X。”紧贴后面的问题，问答距离
+        从约 53 字缩到约 9 字，64 字窗口能同时盖住线索与答案。"""
+        return (f"世界状态。在场人物{_join(self.present_characters())}。"
                 f"可见物品{_join(self.present_items())}。"
                 f"随身物品{_join(self.carried_items())}。"
-                f"时间第{int_to_zh(self.time_step)}步{self.day_night()}。")
+                f"时间第{int_to_zh(self.time_step)}步{self.day_night()}。"
+                f"你在{self.visitor_location}。")
 
     # -- 工具（ToolRouter 可直接挂的函数，参数为字符串）-------------------------
     def look(self, arg: str) -> str:

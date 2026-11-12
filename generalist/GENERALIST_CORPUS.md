@@ -5,13 +5,14 @@
 | 来源 | 规模 | 用途 | 状态 |
 |---|---|---|---|
 | 西游记 Xiyouji.txt | 677,421 字 | 经典域 | 已落地 |
+| 《儒林外史》（Gutenberg #24032 繁体本，OpenCC t2s 转简体，整句过滤） | 231,102 字（过滤后；原文 278,693 字，留存率 84.0%） | 经典域 | 已落地 2026-11-12（第 193 块起生效；转简后全文 rulinwaishi_simplified.txt，训练用句 classics_rulin.txt） |
 | 仓库主线 .py（根目录＋tools＋tests，26 个文件） | 302,957 字 | 代码域 | 已落地 |
 | 仓库 archive .py（9 个文件，含 305,750 字的旧 omega.py） | 417,447 字 | — | 试点排除（旧实验，不代表现在风格） |
 | 仓库 legacy .py（5 个文件） | 51,451 字 | — | 试点排除 |
 | 对话试点 dialogue_pilot.txt（127 轮脚本化对话） | 2,918 字 | 对话域 | 已落地（generalist_corpus/）；试点后由 40 轮扩到 127 轮（试点教训：40 轮被模板记录淹没，出了对话壳子、内容是背下来的记忆问句） |
 | 协议记录（计算/抄写/记忆格式，训练器内部） | 6,101 条 | 推理域 | 已落地（训练器构建时导出） |
-| 世界工具记录 world_tool_records_v8.jsonl | 1,763 条 | 世界域 | 已落地 |
-| 自报记录 self_report_records_full.jsonl | 1,200 条 | 世界域 | 已落地（文本复用，与旧词表无关） |
+| 世界工具记录 world_tool_records_v9.jsonl | 1,763 条 | 世界域 | 已落地（v9 修法 A 2026-11-12：摘要地点压后，问答距离 ~53→7 字；v8 留工作台备查） |
+| 自报记录 self_report_records_v9.jsonl | 1,200 条 | 世界域 | 已落地（v9 修法 A 2026-11-12；答案与状态 150/150 一致；150 条“我在哪”全在 64 字窗口内，模式暴露约 6.6 次/块） |
 | 常识浅层（维基百科导言 CC BY-SA 4.0＋《幼学琼林》公版） | 42,099 字（过滤后：维基 41,283＋幼学 816） | 常识域 | 已落地 2026-11-11（用户"都加上"；generalist_corpus/knowledge_wiki.txt、knowledge_youxue.txt、knowledge_provenance.md；原始文件 wiki_knowledge_raw.json、youxue_qionglin_raw.txt；均按冻结 4622 词表整句过滤） |
 | 对话存档 dialog_log.jsonl | 0（空） | 对话域（未来） | 用户尚未跑新脚本，待积累 |
 

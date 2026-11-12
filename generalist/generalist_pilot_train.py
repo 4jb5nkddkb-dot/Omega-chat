@@ -14,7 +14,8 @@ train_steps、save_checkpoint），本脚本只做三件新事：
      起切回设计值；此前 1–191 块为 5 域试点配比。
 
 域文本来源（GENERALIST_CORPUS.md）：
-  经典：西游记全文；代码：主线 26 个 .py；对话：dialogue_pilot.txt；
+  经典：西游记全文＋《儒林外史》（Gutenberg #24032 繁体本经 OpenCC t2s
+    转简体，均按 4622 词表整句过滤，见 generalist_corpus/）；
   常识：knowledge_wiki.txt（维基百科导言，CC BY-SA 4.0）＋
     knowledge_youxue.txt（《幼学琼林》Gutenberg 公版），两者均已按
     4622 词表整句过滤（见 knowledge_provenance.md）；
@@ -80,7 +81,9 @@ def reasoning_text(seed=7):
 
 def domain_texts(tok):
     texts = {}
-    texts["经典"] = (MIRROR / "Xiyouji.txt").read_text(encoding="utf-8")
+    texts["经典"] = ((MIRROR / "Xiyouji.txt").read_text(encoding="utf-8")
+                     + (HERE / "generalist_corpus/classics_rulin.txt").read_text(
+                         encoding="utf-8"))
     main_py = [p for p in glob.glob(str(MIRROR / "**/*.py"), recursive=True)
                if "__pycache__" not in p
                and "/archive/" not in p and "/legacy/" not in p]
@@ -95,7 +98,8 @@ def domain_texts(tok):
         + (HERE / "generalist_corpus/knowledge_youxue.txt").read_text(
             encoding="utf-8"))
     world = []
-    for name in ("world_tool_records_v8.jsonl", "self_report_records_full.jsonl"):
+    # v9 修法 A（2026-11-12，用户选 C）：摘要地点压后，问答距离 ~53→7 字
+    for name in ("world_tool_records_v9.jsonl", "self_report_records_v9.jsonl"):
         for line in open(HERE / name, encoding="utf-8"):
             world.append(json.loads(line)["text"])
     texts["世界"] = "\n".join(world)
