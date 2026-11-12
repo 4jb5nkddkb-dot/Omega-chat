@@ -71,3 +71,13 @@ sidecar 的接地分就是现成的东西：`world_state.validate()`（叙述与
 - dashboard（内核自带 `omega-dashboard`，另起）；
 - 手机打包（Pythonista 壳另算）；
 - 第 202 块后的全面评估与 Drive 备份（训练线照常走）。
+
+## Windows 可玩版（gui/）
+
+`gui/` 是给 Windows 电脑准备的 tkinter 界面：走动、查看、拾取、对话、
+问问题、换人格、自动玩 12 步，每句回话当场判对错并计分，对话存进
+`dialog_log.jsonl`。纯标准库 tkinter + NumPy，双击 `run_gui.bat`，
+启动时选一个模型产品 `.npz`（Drive 备份里的 `s57300` 就行）。
+详见 `gui/README.md`。自动玩的动作轮换是按内核动作形状排的，还不是
+真正的内核在选——Windows 版桥接器以后再编，没在真 Windows 上跑过的
+二进制不发。
