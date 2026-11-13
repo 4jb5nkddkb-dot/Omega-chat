@@ -99,7 +99,10 @@ def domain_texts(tok):
             encoding="utf-8"))
     world = []
     # v9 修法 A（2026-11-12，用户选 C）：摘要地点压后，问答距离 ~53→7 字
-    for name in ("world_tool_records_v9.jsonl", "self_report_records_v9.jsonl"):
+    # v10（2026-11-12，用户选 B＋探针格式）：加探针格式记录 600 条
+    # （摘要＋探针原问＋标准答案，无锚定行、无“问：”包装，与循环探针同格式）
+    for name in ("world_tool_records_v9.jsonl", "self_report_records_v9.jsonl",
+                 "probe_format_records.jsonl"):
         for line in open(HERE / name, encoding="utf-8"):
             world.append(json.loads(line)["text"])
     texts["世界"] = "\n".join(world)
@@ -152,7 +155,7 @@ def main():
     ap.add_argument("--n_heads", type=int, default=8)
     ap.add_argument("--n_kv_heads", type=int, default=4)
     ap.add_argument("--batch", type=int, default=8)
-    ap.add_argument("--seq", type=int, default=64)
+    ap.add_argument("--seq", type=int, default=128)  # B（2026-11-12）：64→128
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--init", default=None,
@@ -177,6 +180,7 @@ def main():
     n_params = sum(int(v.size) for v in model.params.values())
     print(f"model: d={args.d_model} blocks={args.n_blocks} heads={args.n_heads} "
           f"kv={args.n_kv_heads} params={n_params:,}")
+    print(f"train: seq_len={args.seq} batch_size={args.batch}")
     resume_from = None
     steps = args.steps
     if args.init:
@@ -218,7 +222,7 @@ def main():
         batch_fn=batch_fn, checkpoint_path=args.out,
         resume_from=resume_from, save_every=(args.save_every or None),
         extra_meta={"tokenizer": tok.to_meta(), "recipe": "generalist-pilot",
-                    "ratios": dict(RATIOS)})
+                    "ratios": dict(RATIOS), "seq_len": args.seq})
     dt = time.time() - t0
     print(f"done: {steps} steps in {dt:.1f}s "
           f"({dt / max(steps, 1):.2f} s/step) -> {args.out}")
