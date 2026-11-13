@@ -209,6 +209,25 @@ def main():
     print(f"vocab: {tok.vocab_size} (BOS/EOS/UNK 0/1/2)")
     ids = domain_texts(tok)
 
+    # --init/--resume：从源检查点恢复本次运行的 flags（merge/tied 来自 config，
+    # seq/dropout/label_smoothing 来自 extra），断点续跑与热启动再也不用重敲
+    # flags——v2 运行全是非默认值，靠人记必错。extra 里没有的项沿用命令行值。
+    if args.init or args.resume:
+        src_ck = read_checkpoint(args.init or args.resume)
+        src_cfg = src_ck["meta"]["config"]
+        args.merge = src_cfg.get("merge_method", args.merge)
+        args.tie = bool(src_cfg.get("tie_embeddings", args.tie))
+        src_extra = src_ck["meta"].get("extra", {})
+        if "seq_len" in src_extra:
+            args.seq = int(src_extra["seq_len"])
+        if "dropout" in src_extra:
+            args.dropout = float(src_extra["dropout"])
+        if "label_smoothing" in src_extra:
+            args.label_smoothing = float(src_extra["label_smoothing"])
+        print(f"restored run flags from {args.init or args.resume}: "
+              f"merge={args.merge} tied={args.tie} seq={args.seq} "
+              f"dropout={args.dropout} label_smoothing={args.label_smoothing}")
+
     model = DualTransformerNP(
         d_model=args.d_model, n_blocks=args.n_blocks, n_heads=args.n_heads,
         merge_method=args.merge, use_rms=True, max_seq=512, seed=args.seed,
@@ -261,7 +280,10 @@ def main():
         resume_from=resume_from, save_every=(args.save_every or None),
         label_smoothing=args.label_smoothing, dropout=args.dropout,
         extra_meta={"tokenizer": tok.to_meta(), "recipe": "generalist-v2",
-                    "ratios": dict(RATIOS), "seq_len": args.seq})
+                    "ratios": dict(RATIOS), "seq_len": args.seq,
+                    "merge": args.merge, "tied": args.tie,
+                    "dropout": args.dropout,
+                    "label_smoothing": args.label_smoothing})
     dt = time.time() - t0
     print(f"done: {steps} steps in {dt:.1f}s "
           f"({dt / max(steps, 1):.2f} s/step) -> {args.out}")
