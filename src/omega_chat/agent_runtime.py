@@ -54,6 +54,62 @@ class Protocol:
 
 
 # ----------------------------------------------------------------------------
+# 在线记忆：最近答对的（状态 -> 提问/动作 -> 正确回复），拼进提示做少样本锚定。
+# ----------------------------------------------------------------------------
+
+class CognitiveMemoryBuffer:
+    """轻量认知记忆缓存：只存答对的，不存答错的。
+
+    用途：把最近答对的例子动态拼进下一轮提示，作少样本格式锚定，
+    压制模型复读原著台词（“却说那怪……”“行者道……”）的惯性。
+    容量默认 3，满了丢最旧的；同状态同提问去重（新纪录顶掉旧的）。
+
+    纯标准库，不碰模型权重，不改推理路径——调用方只在组装提示时
+    把 format_examples() 拼在提示最前面，判卷答对时调 add_success()。
+    """
+
+    def __init__(self, capacity: int = 3):
+        self.capacity = max(1, int(capacity))
+        self._items = []  # 每条 {"state": 状态摘要, "prompt": 提问/动作, "reply": 正确回复}
+
+    def __len__(self):
+        return len(self._items)
+
+    def add_success(self, state, prompt, reply):
+        """写入一次答对：当前真实状态摘要 + 提问/动作 + 正确回复。"""
+        item = {"state": str(state), "prompt": str(prompt), "reply": str(reply)}
+        self._items = [it for it in self._items
+                       if not (it["state"] == item["state"]
+                               and it["prompt"] == item["prompt"])]
+        self._items.append(item)
+        del self._items[:max(0, len(self._items) - self.capacity)]
+
+    def examples(self):
+        """缓存内容的副本（供日志存档导出用，不含任何推理状态）。"""
+        return [dict(it) for it in self._items]
+
+    def format_examples(self, max_chars: int = 64) -> str:
+        """拼提示用的示例块：每条一行“提问＋正确回复”，空缓存返回空串。
+
+        不带状态摘要是故意的：例子只教格式（短句直答），地点以当前
+        摘要为准；带摘要的例子会把旧地点塞进上下文，模型容易照抄。
+        也不加标题行：标题会引入提示里原本没有的新字符，示例行本身
+        就是现成的提问与回复，不需要额外解释。单条超长时截断到
+        max_chars（优先在句号处断，不断就硬断），防止提示无限膨胀。
+        """
+        if not self._items:
+            return ""
+        lines = []
+        for it in self._items:
+            line = f"{it['prompt']}{it['reply']}"
+            if len(line) > max_chars:
+                cut = line.rfind("。", 0, max_chars)
+                line = line[:cut + 1] if cut >= 0 else line[:max_chars]
+            lines.append(line)
+        return "\n".join(lines) + "\n"
+
+
+# ----------------------------------------------------------------------------
 # Model access: works with generate_cached models and with forward-only models.
 # ----------------------------------------------------------------------------
 

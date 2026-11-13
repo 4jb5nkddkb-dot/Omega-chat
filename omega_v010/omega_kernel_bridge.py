@@ -20,6 +20,13 @@ Action mapping (kernel action -> world/model behaviour):
 Grounded error is 0.0 (reply consistent with the world) or 1.0
 (contradicted it), from world_state.validate() and the probe
 score() in world_self_probe.py. Reward = 1 - grounded error.
+
+Online memory: every grounded-correct model reply is cached in a
+CognitiveMemoryBuffer (capacity 3, correct-only) and prepended to
+the next prompt as few-shot format anchors, to suppress the model's
+habit of echoing classical lines ("却说那怪……" / "行者道……").
+The buffer lives only in memory; the Rust bridge protocol
+(observation.json / outcome.json) is unchanged.
 """
 import argparse
 import glob
@@ -36,6 +43,7 @@ sys.path.insert(0, os.path.expanduser("~/workspace/omega-chat"))
 sys.path.insert(0, os.path.expanduser("~/workspace/omega-chat/tools"))
 sys.path.insert(0, os.path.expanduser("~/workspace/dual_side/xiyouji_modern_trainer_1"))
 
+import agent_runtime as ar
 import world_anchor as wa
 import world_loop as wl
 import world_state as ws
@@ -77,12 +85,16 @@ class Sidecar:
         self.last_err = 0.0
         self.qi = 0
         self.loc_idx = 0
+        self.memory = ar.CognitiveMemoryBuffer(capacity=3)
 
     def prompt(self, user_text):
         return wa.anchor_prompt(self.me, self.state) + "\n" + user_text
 
     def generate(self, prompt, max_new=None):
-        ids = self.tok.encode(prompt, add_bos=True)
+        # 在线记忆防复读：把缓存的答对示例拼在提示最前面，再送入模型。
+        # 空缓存时 format_examples() 返回空串，提示与原来一字不差。
+        full = self.memory.format_examples() + prompt
+        ids = self.tok.encode(full, add_bos=True)
         if self.tok.UNK in ids:
             print("WARN: UNK in prompt", flush=True)
         try:
@@ -95,6 +107,11 @@ class Sidecar:
                                       temperature=0.0)
         return self.tok.decode(out[len(ids):])
 
+    def _remember(self, prompt_text, reply):
+        """答对才记：把（当前真实状态摘要，提问/动作，正确回复）写进记忆缓存。"""
+        if reply:
+            self.memory.add_success(self.state.summary(), prompt_text, reply)
+
     def ask_question(self, qi):
         # Probe-exact format: summary + question sentence, no anchor
         # lines, no 问： wrapper. This is the format the world domain
@@ -102,16 +119,22 @@ class Sidecar:
         q = wsp.QUESTIONS[qi]
         cont = self.generate(ws.world_prompt(self.state, q), 32)
         ok, note = wsp.score(self.state, qi, cont)
+        if ok:
+            self._remember(q, cont)
         return cont, (0.0 if ok else 1.0), note
 
     def narrate_arrival(self, dest):
         cont = self.generate(self.prompt(f"你来到了{dest}，说说这里。"), 16)
         flags = self.state.validate(cont)
+        if not flags:
+            self._remember(f"你来到了{dest}，说说这里。", cont)
         return cont, (1.0 if flags else 0.0), "; ".join(flags)
 
     def talk(self, name):
         cont = self.generate(self.prompt(f"和{name}说说话。"))
         flags = self.state.validate(cont)
+        if not flags:
+            self._remember(f"和{name}说说话。", cont)
         return cont, (1.0 if flags else 0.0), "; ".join(flags)
 
     def observation(self, step):
