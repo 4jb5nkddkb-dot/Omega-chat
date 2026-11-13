@@ -72,6 +72,14 @@ def reasoning_text(seed=7):
     for _ in range(200):
         a, b = int(rng.integers(2, 10)), int(rng.integers(2, 10))
         lines.append(f"问：{zh(a)}乘{zh(b)}等于几？答案是{zh(a * b)}。")
+    for _ in range(300):  # 减法（2026-11-12 补）：被减数 1..19，减数 ≤ 被减数，结果非负
+        a = int(rng.integers(1, 20))
+        b = int(rng.integers(1, a + 1))
+        lines.append(f"问：{zh(a)}减{zh(b)}等于几？答案是{zh(a - b)}。")
+    for _ in range(200):  # 除法（2026-11-12 补）：整除，商 1..9
+        b = int(rng.integers(2, 10))
+        k = int(rng.integers(1, 10))
+        lines.append(f"问：{zh(b * k)}除以{zh(b)}等于几？答案是{zh(k)}。")
     for _ in range(200):
         w = rng.choice(["苹果", "花果山", "金箍棒", "蟠桃", "南海", "取经路"])
         lines.append(f"记住这个词：{w}。")

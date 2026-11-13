@@ -92,7 +92,7 @@ def main():
     # ---- 出处 ----
     with open(f"{HERE}/knowledge_provenance.md", "w",
               encoding="utf-8") as f:
-        f.write("# 常识域出处（2026-11-11 落地）\n\n")
+        f.write("# 常识域出处（2026-11-11 落地，2026-11-12 续抓一批）\n\n")
         f.write("## A：中文维基百科条目导言（CC BY-SA 4.0）\n\n")
         f.write("来源：zh.wikipedia.org API 随机条目导言（exintro），"
                 "CC BY-SA 4.0，可自由复制改作，条件是署名（附条目链接）"
