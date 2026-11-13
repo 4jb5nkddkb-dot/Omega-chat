@@ -16,12 +16,13 @@ Features:
 - AdamW with decoupled weight decay and global-norm gradient clipping
 - Next-token training, greedy/temperature/top-k/top-p generation, KV-cached generation
 - Optional label smoothing, warmup + cosine LR schedule, gradient accumulation, CSV logs
+- Residual dropout (train-only): dropout + rng in loss_and_grads/train_steps drop
+  the attention/FFN residual-branch outputs; inference and generation never drop.
 - Toy tasks (arith / copy) for quick sanity checks
 - Borrowed from transformer_core.py: final norm before the output head, GPT-2 style scaled
   residual init, weight decay on matrices only, optional tied embeddings, optional char-level
   tokenizer (better for Chinese text than bytes: about 3x shorter sequences)
-- Not included: dropout, post-norm, learned position embeddings (they existed only in the
-  older train_dual_transformer.py and are not part of this file)
+- Not included: post-norm
 - Checkpoints: .npz files holding parameters, optimizer state, step, RNG state.
   With a validation split, the best-validation weights go to --checkpoint and the
   latest state (used for resume) goes to <stem>_last<suffix>.
@@ -300,9 +301,31 @@ def _sigmoid(x):
     return 0.5 * (1.0 + np.tanh(0.5 * x))
 
 
-def _block_fwd(params, pre, x, n_heads, n_kv_heads, use_rms, use_rope, ff_mode, offset, past):
+def _dropout_mask(rng, shape, dtype, p):
+    """Inverted dropout mask (kept entries scaled by 1/(1-p)); None when p == 0.
+
+    p == 0 returns before touching the rng, so dropout=0 leaves the random
+    stream — and therefore the loss, gradients and batch sequence — exactly
+    as if dropout did not exist. p > 0 without an rng is an error: silent
+    nondeterminism would break resume reproducibility.
+    """
+    if p <= 0.0:
+        return None
+    if p >= 1.0:
+        raise ValueError("dropout must be < 1.0")
+    if rng is None:
+        raise ValueError("dropout needs an rng for the mask")
+    keep = (rng.random(shape) >= p).astype(dtype)
+    return keep * (1.0 / (1.0 - p))
+
+
+def _block_fwd(params, pre, x, n_heads, n_kv_heads, use_rms, use_rope, ff_mode, offset, past,
+               dropout=0.0, rng=None):
     n1, c_n1 = _norm_fwd(x, params, pre + "norm1", use_rms)
     a, c_a, kv = _attn_fwd(n1, params, pre, n_heads, n_kv_heads, use_rope, offset, past)
+    mask_a = _dropout_mask(rng, a.shape, a.dtype, dropout)
+    if mask_a is not None:
+        a = a * mask_a
     x1 = x + a
     n2, c_n2 = _norm_fwd(x1, params, pre + "norm2", use_rms)
     if ff_mode == "swiglu":
@@ -316,16 +339,20 @@ def _block_fwd(params, pre, x, n_heads, n_kv_heads, use_rms, use_rope, ff_mode, 
         g, t = _gelu_fwd(f1)
         f2 = _linear_fwd(g, params, pre + "ff2")
         ff_cache = ("gelu", n2, f1, g, t)
+    mask_f = _dropout_mask(rng, f2.shape, f2.dtype, dropout)
+    if mask_f is not None:
+        f2 = f2 * mask_f
     y = x1 + f2
-    cache = (c_n1, c_a, c_n2, ff_cache)
+    cache = (c_n1, c_a, c_n2, ff_cache, mask_a, mask_f)
     return y, cache, kv
 
 
 def _block_bwd(dy, cache, params, grads, pre, use_rms):
-    c_n1, c_a, c_n2, ff_cache = cache
+    c_n1, c_a, c_n2, ff_cache, mask_a, mask_f = cache
     if ff_cache[0] == "swiglu":
         _, n2, g1, u, act = ff_cache
-        dact = _linear_bwd(dy, act, params, grads, pre + "ff2")
+        d_ff = dy * mask_f if mask_f is not None else dy
+        dact = _linear_bwd(d_ff, act, params, grads, pre + "ff2")
         s = _sigmoid(g1)
         du = dact * (g1 * s)
         dg1 = (dact * u) * s * (1.0 + g1 * (1.0 - s))
@@ -333,11 +360,13 @@ def _block_bwd(dy, cache, params, grads, pre, use_rms):
             + _linear_bwd(du, n2, params, grads, pre + "ff_up")
     else:
         _, n2, f1, g, t = ff_cache
-        dg = _linear_bwd(dy, g, params, grads, pre + "ff2")
+        d_ff = dy * mask_f if mask_f is not None else dy
+        dg = _linear_bwd(d_ff, g, params, grads, pre + "ff2")
         df1 = _gelu_bwd(dg, f1, t)
         dn2 = _linear_bwd(df1, n2, params, grads, pre + "ff1")
     dx1 = dy + _norm_bwd(dn2, c_n2, params, grads, pre + "norm2", use_rms)
-    dn1 = _attn_bwd(dx1, c_a, params, grads, pre)
+    d_attn = dx1 * mask_a if mask_a is not None else dx1
+    dn1 = _attn_bwd(d_attn, c_a, params, grads, pre)
     return dx1 + _norm_bwd(dn1, c_n1, params, grads, pre + "norm1", use_rms)
 
 
@@ -719,7 +748,7 @@ class DualTransformerNP:
         if tokens.min() < 0 or tokens.max() >= self.vocab_size:
             raise ValueError(f"token IDs must be in [0, {self.vocab_size - 1}]")
 
-    def _forward(self, tokens, pasts=None):
+    def _forward(self, tokens, pasts=None, dropout=0.0, rng=None):
         B, S = tokens.shape
         offset = 0
         if pasts is not None and pasts.get("left") and pasts["left"][0] is not None:
@@ -738,7 +767,8 @@ class DualTransformerNP:
                 past = pasts[name][i] if pasts is not None else None
                 h, cache, kv = _block_fwd(self.params, f"{name}.{i}.", h,
                                           self.n_heads, self.n_kv_heads, self.use_rms,
-                                          self.pos_mode == "rope", self.ff_mode, offset, past)
+                                          self.pos_mode == "rope", self.ff_mode, offset, past,
+                                          dropout=dropout, rng=rng)
                 bc.append(cache)
                 kvs.append(kv)
             outs[name] = h
@@ -768,16 +798,18 @@ class DualTransformerNP:
         logits, _, _, new_kv, _, _ = self._forward(tokens, pasts)
         return logits, new_kv
 
-    def loss(self, tokens, targets, label_smoothing=0.0) -> float:
-        logits = self.forward(tokens)
+    def loss(self, tokens, targets, label_smoothing=0.0, dropout=0.0, rng=None) -> float:
+        tokens = np.asarray(tokens, dtype=np.int64)
+        self._check_tokens(tokens)
+        logits = self._forward(tokens, dropout=dropout, rng=rng)[0]
         return _cross_entropy(logits, np.asarray(targets, dtype=np.int64), label_smoothing)[0]
 
-    def loss_and_grads(self, tokens, targets, label_smoothing=0.0):
+    def loss_and_grads(self, tokens, targets, label_smoothing=0.0, dropout=0.0, rng=None):
         tokens = np.asarray(tokens, dtype=np.int64)
         targets = np.asarray(targets, dtype=np.int64)
         self._check_tokens(tokens)
         D, V = self.d_model, self.vocab_size
-        logits, h, caches, _, _, fcache = self._forward(tokens)
+        logits, h, caches, _, _, fcache = self._forward(tokens, dropout=dropout, rng=rng)
         loss, dlogits = _cross_entropy(logits, targets, label_smoothing)
         grads = _zeros_like_params(self.params)
         out_dim = h.shape[-1]
@@ -975,7 +1007,7 @@ def make_toy_batch(batch_size, seq_len, rng, task="arith", vocab=TOY_VOCAB):
 def train_steps(model: DualTransformerNP, token_ids=None, steps=500, batch_size=8, seq_len=64,
                 lr=3e-4, log_every=50, val_token_ids=None, checkpoint_path=None,
                 eval_every=50, resume_from=None, seed=0, weight_decay=0.01, max_grad_norm=1.0,
-                label_smoothing=0.0, grad_accum_steps=1, schedule="constant", warmup_steps=0,
+                label_smoothing=0.0, dropout=0.0, grad_accum_steps=1, schedule="constant", warmup_steps=0,
                 min_lr_ratio=0.1, log_csv=None, batch_fn=None, extra_meta=None,
                 save_every=None):
     """Train with optional validation, checkpointing, LR schedule, gradient accumulation and CSV logs.
@@ -1081,7 +1113,8 @@ def train_steps(model: DualTransformerNP, token_ids=None, steps=500, batch_size=
             grads_acc, loss_acc = None, 0.0
             for _ in range(grad_accum_steps):
                 x, y = batch_fn(rng)
-                loss, grads = model.loss_and_grads(x, y, label_smoothing=label_smoothing)
+                loss, grads = model.loss_and_grads(x, y, label_smoothing=label_smoothing,
+                                                   dropout=dropout, rng=rng)
                 if not math.isfinite(loss):
                     raise FloatingPointError(f"non-finite training loss at step {step}")
                 loss_acc += float(loss) / grad_accum_steps
@@ -1183,6 +1216,48 @@ def numerical_gradient_test():
                             f"abs_err={abs_err:.3g}, rel_err={rel_err:.3g}")
                     checked += 1
     print(f"Gradient checks OK: {checked} sampled entries across merge modes and norm types")
+
+
+def dropout_gradient_test():
+    """Dropout forward/backward agree with central finite differences (float64).
+
+    The masks must be identical for every loss evaluation in the finite
+    difference, so each call re-seeds its rng the same way. Also checks
+    dropout=0 reproduces the no-dropout loss and gradients exactly.
+    """
+    rng = np.random.default_rng(123)
+    x = np.array([[BOS_ID, 97, 98]], dtype=np.int64)
+    y = np.array([[97, 98, 99]], dtype=np.int64)
+    eps = 1e-6
+    model = DualTransformerNP(d_model=8, n_blocks=1, n_heads=2, merge_method="single",
+                              use_rms=True, max_seq=8, seed=123, dtype=np.float64)
+    loss0, grads0 = model.loss_and_grads(x, y)
+    loss_d0, grads_d0 = model.loss_and_grads(x, y, dropout=0.0, rng=np.random.default_rng(0))
+    assert loss0 == loss_d0
+    for k in grads0:
+        assert np.array_equal(grads0[k], grads_d0[k]), f"dropout=0 changed grads[{k}]"
+    _, grads = model.loss_and_grads(x, y, dropout=0.5, rng=np.random.default_rng(0))
+    checked = 0
+    for name, arr in model.params.items():
+        for _ in range(min(arr.size, 2)):
+            idx = np.unravel_index(int(rng.integers(arr.size)), arr.shape)
+            orig = arr[idx]
+            arr[idx] = orig + eps
+            lp = model.loss(x, y, dropout=0.5, rng=np.random.default_rng(0))
+            arr[idx] = orig - eps
+            lm = model.loss(x, y, dropout=0.5, rng=np.random.default_rng(0))
+            arr[idx] = orig
+            numeric = (lp - lm) / (2 * eps)
+            analytic = float(grads[name][idx])
+            abs_err = abs(analytic - numeric)
+            rel_err = abs_err / max(abs(analytic), abs(numeric), 1e-12)
+            if not (abs_err < 1e-7 or rel_err < 1e-4):
+                raise AssertionError(
+                    f"dropout {name}{idx} gradient check failed: "
+                    f"analytic={analytic:.12g}, numeric={numeric:.12g}, "
+                    f"abs_err={abs_err:.3g}, rel_err={rel_err:.3g}")
+            checked += 1
+    print(f"Dropout gradient checks OK: {checked} sampled entries (dropout=0.5, fixed masks)")
 
 
 def checkpoint_round_trip_test():
@@ -1545,6 +1620,7 @@ def smoke_test():
         print(f"{merge}: forward/backward/generate OK; params={model.num_params():,}; loss={loss:.4f}")
     print("Tokenizer UTF-8 round-trip OK")
     numerical_gradient_test()
+    dropout_gradient_test()
     checkpoint_round_trip_test()
     training_validation_resume_test()
     no_validation_resume_test()

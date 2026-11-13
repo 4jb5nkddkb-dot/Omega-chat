@@ -6,12 +6,15 @@
 train_steps、save_checkpoint），本脚本只做三件新事：
   1. 分词器：generalist_vocab.json（通用词表），不用 from_text 现算；
   2. 架构：d512/4 层/8 头/kv 4、merge single、RMS、RoPE、SwiGLU、
-     不 tied（与老 d128 同家族，只放大）；
-  3. 混合采样：batch_fn 按设计配比抽域（经典 25 / 代码 20 / 对话 20 /
-     常识 15 / 推理 10 / 世界 10），再在域内随机取窗口——配比是采样权重，
+     tied embeddings（v2 起，见下）；dropout 0.1＋label smoothing 0.1
+     （v2 起，训练时生效，推理不受影响）；
+  3. 混合采样：batch_fn 按设计配比抽域（v2 配比：经典 25 / 代码 20 /
+     对话 10 / 常识 15 / 推理 15 / 世界 15），每批按最大余数法分层取数
+     （每域每批至少 1 条），再在域内随机取窗口——配比是采样权重，
      不是文件大小比，小文件循环采样。常识域 2026-11-11 落地（A 维基
      百科导言＋B《幼学琼林》，见 GENERALIST_CORPUS.md），配比自第 192 块
-     起切回设计值；此前 1–191 块为 5 域试点配比。
+     起切回设计值；此前 1–191 块为 5 域试点配比。v2（2026-11-13）：
+     对话 20→10（2918 字域被重复数百遍）、世界/推理各 10→15。
 
 域文本来源（GENERALIST_CORPUS.md）：
   经典：西游记全文＋《儒林外史》（Gutenberg #24032 繁体本经 OpenCC t2s
@@ -47,8 +50,8 @@ HERE = Path(__file__).resolve().parent
 MIRROR = Path(os.path.expanduser("~/workspace/omega-chat"))
 VOCAB_JSON = HERE / "generalist_vocab.json"
 
-RATIOS = [("经典", 0.25), ("代码", 0.20), ("对话", 0.20),
-          ("常识", 0.15), ("推理", 0.10), ("世界", 0.10)]
+RATIOS = [("经典", 0.25), ("代码", 0.20), ("对话", 0.10),
+          ("常识", 0.15), ("推理", 0.15), ("世界", 0.15)]  # v2（2026-11-13）
 
 _ZH = "零一二三四五六七八九十"
 
@@ -123,23 +126,41 @@ def domain_texts(tok):
     return ids
 
 
+def _batch_counts(weights, batch_size):
+    """Largest-remainder counts: every domain appears in every batch in
+    proportion (min 1 when batch_size >= n_domains). Fixes the old
+    multinomial draw, where a 20%-weight domain could get 0 or 3 rows
+    in an 8-row batch by chance."""
+    raw = np.asarray(weights, dtype=np.float64) * batch_size
+    counts = np.floor(raw).astype(int)
+    remainder = int(batch_size - counts.sum())
+    order = np.argsort(-(raw - counts))
+    for i in order[:remainder]:
+        counts[i] += 1
+    return counts
+
+
 def make_batch_fn(ids, seq_len, batch_size=8, seed=7):
     names = [n for n, _ in RATIOS]
     weights = np.asarray([w for _, w in RATIOS], dtype=np.float64)
     weights = weights / weights.sum()
     rng = np.random.default_rng(seed)
+    counts = _batch_counts(weights, batch_size)
 
     def batch_fn(r):
         # 注意：train_steps 传进来的 r 就是它自己的 rng；这里用独立 rng
-        # 抽域，保证配比不受训练 rng 影响。
-        doms = rng.choice(len(names), size=batch_size, p=weights)
+        # 抽域，保证配比不受训练 rng 影响。分层取数：每批各域条数固定，
+        # 域内窗口随机，批内顺序打乱。
         inputs, targets = [], []
-        for d in doms:
+        for d, c in enumerate(counts):
             arr = ids[names[d]]
-            s = int(rng.integers(0, len(arr) - seq_len - 1))
-            inputs.append(arr[s:s + seq_len])
-            targets.append(arr[s + 1:s + seq_len + 1])
-        return np.stack(inputs), np.stack(targets)
+            for _ in range(int(c)):
+                s = int(rng.integers(0, len(arr) - seq_len - 1))
+                inputs.append(arr[s:s + seq_len])
+                targets.append(arr[s + 1:s + seq_len + 1])
+        order = rng.permutation(len(inputs))
+        return (np.stack([inputs[i] for i in order]),
+                np.stack([targets[i] for i in order]))
 
     return batch_fn
 
@@ -166,6 +187,14 @@ def main():
     ap.add_argument("--seq", type=int, default=128)  # B（2026-11-12）：64→128
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--merge", choices=("single", "average", "concat"),
+                    default="single", help="分支合并方式（v2 试点定 single 还是 average）")
+    ap.add_argument("--tie", action="store_true",
+                    help="tied embeddings：输出头复用输入 embedding（v2 默认开，省 2.37M 参数）")
+    ap.add_argument("--dropout", type=float, default=0.0,
+                    help="残差分支 dropout，训时生效、推理为 0（v2 用 0.1）")
+    ap.add_argument("--label-smoothing", type=float, default=0.0,
+                    help="标签平滑（v2 用 0.1）")
     ap.add_argument("--init", default=None,
                     help="上一块产品路径：只取参数热启动，优化器与学习率"
                          "曲线全新（与老线补丁轮同款做法）")
@@ -182,12 +211,13 @@ def main():
 
     model = DualTransformerNP(
         d_model=args.d_model, n_blocks=args.n_blocks, n_heads=args.n_heads,
-        merge_method="single", use_rms=True, max_seq=512, seed=args.seed,
-        dtype=np.float32, vocab_size=tok.vocab_size, tie_embeddings=False,
+        merge_method=args.merge, use_rms=True, max_seq=512, seed=args.seed,
+        dtype=np.float32, vocab_size=tok.vocab_size, tie_embeddings=args.tie,
         n_kv_heads=args.n_kv_heads, pos_mode="rope", ff_mode="swiglu")
     n_params = sum(int(v.size) for v in model.params.values())
     print(f"model: d={args.d_model} blocks={args.n_blocks} heads={args.n_heads} "
-          f"kv={args.n_kv_heads} params={n_params:,}")
+          f"kv={args.n_kv_heads} merge={args.merge} tied={args.tie} "
+          f"dropout={args.dropout} label_smoothing={args.label_smoothing} params={n_params:,}")
     print(f"train: seq_len={args.seq} batch_size={args.batch}")
     resume_from = None
     steps = args.steps
@@ -229,7 +259,8 @@ def main():
         schedule="cosine", warmup_steps=10, seed=args.seed,
         batch_fn=batch_fn, checkpoint_path=args.out,
         resume_from=resume_from, save_every=(args.save_every or None),
-        extra_meta={"tokenizer": tok.to_meta(), "recipe": "generalist-pilot",
+        label_smoothing=args.label_smoothing, dropout=args.dropout,
+        extra_meta={"tokenizer": tok.to_meta(), "recipe": "generalist-v2",
                     "ratios": dict(RATIOS), "seq_len": args.seq})
     dt = time.time() - t0
     print(f"done: {steps} steps in {dt:.1f}s "
