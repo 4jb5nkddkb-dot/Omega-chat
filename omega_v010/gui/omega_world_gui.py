@@ -30,6 +30,7 @@ sys.path.insert(0, str(HERE))
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
+import agent_runtime as ar
 import world_anchor as wa
 import world_loop as wl
 import world_state as ws
@@ -57,15 +58,39 @@ class Game:
         self.archive_path = HERE / "dialog_log.jsonl"
         self.archive_on = True
         self.archive_warned = False
+        self.memory = ar.CognitiveMemoryBuffer(capacity=3)
+        self._last_turn = None  # 最近一次模型调用的输入（供 record 写档用）
 
     def generate(self, prompt, max_new):
-        ids = self.tok.encode(prompt, add_bos=True)
+        # 在线记忆防复读：把缓存的答对示例拼在提示最前面，再送入模型。
+        # 空缓存时 format_examples() 返回空串，提示与原来一字不差。
+        prefix = self.memory.format_examples()
+        full = prefix + prompt
+        self._last_turn = {"prompt": full, "base_prompt": prompt,
+                           "memory_examples": self.memory.examples()}
+        ids = self.tok.encode(full, add_bos=True)
         try:
             out = self.model.generate_cached(ids, max_new, temperature=0.0)
         except Exception:
             out = self.model.generate(ids, max_new_tokens=max_new,
                                       temperature=0.0)
         return self.tok.decode(out[len(ids):])
+
+    def _state_snapshot(self):
+        """当前真实标准状态（写档用：判卷的 ground truth，不是模型说的）。"""
+        st = self.state
+        return {"location": st.visitor_location,
+                "time_step": st.time_step,
+                "day_night": st.day_night(),
+                "present_characters": st.present_characters(),
+                "present_items": st.present_items(),
+                "carried_items": st.carried_items(),
+                "summary": st.summary()}
+
+    def _remember(self, prompt_text, reply):
+        """答对才记：把（当前真实状态摘要，提问/动作，正确回复）写进记忆缓存。"""
+        if reply:
+            self.memory.add_success(self.state.summary(), prompt_text, reply)
 
     def anchor_prompt(self, user_text):
         return wa.anchor_prompt(self.me, self.state) + "\n" + user_text
@@ -74,17 +99,23 @@ class Game:
         q = wsp.QUESTIONS[qi]
         cont = self.generate(ws.world_prompt(self.state, q), 32)
         ok, note = wsp.score(self.state, qi, cont)
+        if ok:
+            self._remember(q, cont)
         return cont, (0.0 if ok else 1.0), note
 
     def ask_free(self, text):
         cont = self.generate(ws.world_prompt(self.state, text), 32)
         flags = self.state.validate(cont)
+        if not flags:
+            self._remember(text, cont)
         return cont, (1.0 if flags else 0.0), "; ".join(flags)
 
     def move(self, dest):
         res = self.state.move(dest)
         cont = self.generate(self.anchor_prompt(f"你来到了{dest}，说说这里。"), 16)
         flags = self.state.validate(cont)
+        if not flags:
+            self._remember(f"你来到了{dest}，说说这里。", cont)
         return res + cont, (1.0 if flags else 0.0), "; ".join(flags)
 
     def look(self):
@@ -97,6 +128,8 @@ class Game:
     def talk(self, name):
         cont = self.generate(self.anchor_prompt(f"和{name}说说话。"), 24)
         flags = self.state.validate(cont)
+        if not flags:
+            self._remember(f"和{name}说说话。", cont)
         return cont, (1.0 if flags else 0.0), "; ".join(flags)
 
     def auto_step(self):
@@ -131,11 +164,24 @@ class Game:
         self.total += 1
         if err == 0.0:
             self.correct += 1
+        # 先取走本轮输入再判断是否存档：查看/拾取不调模型，_last_turn 为空，
+        # 不会把上一轮的输入错贴到这一条上；存档关掉时也不留陈旧输入。
+        last = self._last_turn
+        self._last_turn = None
         if not self.archive_on:
             return
         rec = {"ts": time.strftime("%Y-%m-%d %H:%M:%S"),
                "action": action, "reply": reply,
-               "grounded_error": err, "note": note}
+               "grounded_error": err, "note": note,
+               "verdict": "correct" if err == 0.0 else "wrong",
+               "state": self._state_snapshot()}
+        if last is not None:
+            # prompt 是实际送入模型的完整输入（含记忆示例）；base_prompt
+            # 是去掉示例后的原始提示；memory_examples 是当轮生效的示例。
+            # 微调导出时用 base_prompt + reply + state 拼对齐语料。
+            rec["prompt"] = last["prompt"]
+            rec["base_prompt"] = last["base_prompt"]
+            rec["memory_examples"] = last["memory_examples"]
         try:
             with open(self.archive_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")

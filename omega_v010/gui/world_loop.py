@@ -73,20 +73,27 @@ def _accept_any(text):
 
 def world_turn(model, router, state, prompt, *, self_state=None,
                max_new=96, max_turns=6,
-               governance=None, token_provider=None):
+               governance=None, token_provider=None, memory=None):
     """一回合：锚点行 + 摘要在前、用户话在后；跑完返回 (AgentResult, 矛盾标记列表)。
 
     self_state 为空时用默认自我（Omega/omega、无意图）；调用方可持一个
     SelfState 在回合之间 set_persona/set_intent，锚点行随之换。
     提示结构与锚点探针一致：锚点行 + "\\n" + 摘要 + "\\n" + 用户话。
+    memory 为 agent_runtime.CognitiveMemoryBuffer 时：推理前把缓存的
+    答对示例拼在提示最前面；本轮被接受且无矛盾标记时，把（状态摘要，
+    用户话，模型回复）写进缓存。memory=None 时行为与原来完全一致。
     """
     if self_state is None:
         self_state = wa.SelfState()
     full_prompt = wa.anchor_prompt(self_state, state) + "\n" + prompt
+    if memory is not None:
+        full_prompt = memory.format_examples() + full_prompt
     result = ar.run_agent(model, router, full_prompt, _accept_any,
                           max_new=max_new, max_turns=max_turns,
                           governance=governance, token_provider=token_provider)
     flags = state.validate(result.text)
+    if memory is not None and result.ok and not flags and result.text:
+        memory.add_success(state.summary(), prompt, result.text)
     return result, flags
 
 
