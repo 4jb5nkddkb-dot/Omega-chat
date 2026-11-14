@@ -49,9 +49,11 @@ STALL_EPSILON = 0.02
 PBKDF2_ITERATIONS = 120_000
 # Consecutive wrong operator secrets → auto ESCALATED
 AUTH_FAIL_LOCK = 3
-# Default operator secret for demo only (change in production; never hard-code real secrets)
-# Derived once at init; the plaintext is wiped after derivation.
-_DEFAULT_OPERATOR_SECRET = "omega-demo-2026"
+# Operator secret: never hard-coded. Set OMEGA_OPERATOR_SECRET for a fixed
+# secret; otherwise a fresh per-process secret is generated at startup and
+# printed once by main() (demo convenience). The plaintext is wiped after
+# derivation; only the derived key stays in RAM.
+OPERATOR_SECRET_ENV = "OMEGA_OPERATOR_SECRET"
 # Anti-tamper: how often to re-check integrity (every N authorize/execute calls)
 INTEGRITY_CHECK_EVERY = 1
 
@@ -384,7 +386,7 @@ class SkillRegistry:
 class OmegaKernel:
     """完整可运行内核：认知 + 授权 + 执行，fail-closed。"""
 
-    def __init__(self) -> None:
+    def __init__(self, operator_secret: Optional[str] = None) -> None:
         self.version = VERSION
         self.state = KernelState.RUNNING
         self.epoch = 1
@@ -413,7 +415,8 @@ class OmegaKernel:
         self._auth_salt = self._hw_fp + secrets.token_bytes(16)
         self._auth_fail_count = 0
         self._operator_key: Optional[bytes] = None  # set by _bootstrap_operator_key
-        self._bootstrap_operator_key(_DEFAULT_OPERATOR_SECRET)
+        secret = operator_secret or os.environ.get(OPERATOR_SECRET_ENV) or secrets.token_hex(16)
+        self._bootstrap_operator_key(secret)
 
         # --- anti-tamper baseline ---
         self._integrity_baseline = compute_self_integrity()
@@ -856,9 +859,19 @@ class OmegaKernel:
         if not ok:
             return {"ok": False, "error": why, "auth_fails": self._auth_fail_count}
 
-        # Operator gate: must present correct secret (or demo default when None for CLI convenience)
-        secret = operator_secret if operator_secret is not None else _DEFAULT_OPERATOR_SECRET
-        if not self._verify_operator(secret):
+        # Operator gate: the secret must be presented. There is no default:
+        # a hard-coded fallback would let anyone authorize operator actions.
+        # A missing secret fails closed WITHOUT counting toward the lock
+        # (it is not a wrong guess); a wrong secret counts, as before.
+        if operator_secret is None:
+            return {
+                "ok": False,
+                "error": "operator_auth_failed",
+                "auth_fails": self._auth_fail_count,
+                "locked": self.state == KernelState.ESCALATED,
+                "note": "operator secret required; pass it to auth or set OMEGA_OPERATOR_SECRET",
+            }
+        if not self._verify_operator(operator_secret):
             locked = self.state == KernelState.ESCALATED
             return {
                 "ok": False,
@@ -1000,7 +1013,7 @@ BANNER = f"""
   · 派生密钥只存 RAM，不落盘；salt 绑定本机指纹
 命令:
   cycle [预测] [实际]              跑一轮认知（可省略数字，自动随机）
-  auth <suggestion_id> [口令]       批准并签发一次性令牌（默认 demo 口令）
+  auth <suggestion_id> <口令>      批准并签发一次性令牌（启动时打印的本次口令）
   chpass <旧口令> <新口令>          轮换操作员口令（仅 RAM）
   exec <token>                     用令牌执行（用完即废）
   status                           状态 / 安全 / 记忆 / 性能
@@ -1033,7 +1046,7 @@ def _print_cycle(result: Dict[str, Any]) -> None:
         print("  → HOLD：本轮不执行写入")
 
 
-def run_demo(k: OmegaKernel) -> None:
+def run_demo(k: OmegaKernel, operator_secret: Optional[str] = None) -> None:
     print("\n=== DEMO：5 轮认知 + 一次完整授权执行 ===")
     last_apply_sid = None
     for i in range(5):
@@ -1049,7 +1062,7 @@ def run_demo(k: OmegaKernel) -> None:
 
     if last_apply_sid and k.state == KernelState.RUNNING:
         print(f"\n--- 授权最后一次 APPLY: {last_apply_sid} ---")
-        ar = k.authorize(last_apply_sid)
+        ar = k.authorize(last_apply_sid, operator_secret=operator_secret)
         print(ar)
         if ar.get("ok"):
             print(f"--- 执行令牌 {ar['token']} ---")
@@ -1065,8 +1078,12 @@ def run_demo(k: OmegaKernel) -> None:
 
 
 def main() -> None:
-    k = OmegaKernel()
+    env_secret = os.environ.get(OPERATOR_SECRET_ENV)
+    demo_secret = None if env_secret else secrets.token_hex(16)
+    k = OmegaKernel(operator_secret=env_secret or demo_secret)
     print(BANNER)
+    if demo_secret:
+        print(f"[demo] 本次启动的操作口令: {demo_secret}（仅本次进程有效；固定口令请设 {OPERATOR_SECRET_ENV} 环境变量）")
     while True:
         try:
             raw = input("omega> ").strip()
@@ -1091,7 +1108,7 @@ def main() -> None:
         elif cmd == "clear":
             print(k.clear_escalate())
         elif cmd == "demo":
-            run_demo(k)
+            run_demo(k, env_secret or demo_secret)
         elif cmd == "cycle":
             if len(parts) >= 3:
                 try:
@@ -1108,7 +1125,7 @@ def main() -> None:
             _print_cycle(r)
         elif cmd == "auth":
             if len(parts) < 2:
-                print("用法: auth <suggestion_id> [operator_secret]")
+                print("用法: auth <suggestion_id> <operator_secret>（启动时打印的本次口令，或 OMEGA_OPERATOR_SECRET）")
                 continue
             secret = parts[2] if len(parts) >= 3 else None
             print(k.authorize(parts[1], operator_secret=secret))

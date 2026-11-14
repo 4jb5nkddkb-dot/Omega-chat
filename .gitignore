@@ -1,3 +1,20 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# weights / checkpoints — never publish model files
+*.npz
+
+# local secrets
+.env
+*.env
+
+# run artifacts (kernel state, logs, dialog archives)
+run/
+run_*/
+checkpoints/
+state.json
+audit.jsonl
+trajectory.jsonl
+dialog_log.jsonl
+*.log
