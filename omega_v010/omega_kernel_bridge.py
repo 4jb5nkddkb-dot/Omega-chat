@@ -27,6 +27,13 @@ the next prompt as few-shot format anchors, to suppress the model's
 habit of echoing classical lines ("却说那怪……" / "行者道……").
 The buffer lives only in memory; the Rust bridge protocol
 (observation.json / outcome.json) is unchanged.
+
+Register prototype (off by default): when enabled, the location
+sentence is copied verbatim from the current world summary and
+placed at the very front of the prompt, before the memory examples
+— the minimal form of the "state as a read-only system register"
+idea (大眼 point 1). No training, vocabulary, repo or product
+change; the causal probe (causal_probe.py --register) is the test.
 """
 import argparse
 import glob
@@ -68,10 +75,11 @@ def write_json(path, obj):
 
 
 class Sidecar:
-    def __init__(self, run_dir, ckpt, persona, intent, max_new):
+    def __init__(self, run_dir, ckpt, persona, intent, max_new, register=False):
         self.dir = Path(run_dir)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.max_new = max_new
+        self.register = register
         ckpt = ckpt or latest_product()
         self.model, self.tok, self.step, self.arch = wl.load_world_model(ckpt)
         print(f"model: {ckpt} step={self.step} arch={self.arch}", flush=True)
@@ -90,10 +98,24 @@ class Sidecar:
     def prompt(self, user_text):
         return wa.anchor_prompt(self.me, self.state) + "\n" + user_text
 
+    def register_line(self):
+        """The location sentence, copied verbatim from the current world
+        summary (since fix A it is the summary's last sentence)."""
+        summary = self.state.summary()
+        idx = summary.rfind("你在")
+        if idx >= 0:
+            return summary[idx:]
+        return f"你在{self.state.visitor_location}。"
+
     def generate(self, prompt, max_new=None):
         # 在线记忆防复读：把缓存的答对示例拼在提示最前面，再送入模型。
-        # 空缓存时 format_examples() 返回空串，提示与原来一字不差。
-        full = self.memory.format_examples() + prompt
+        # 只拼与当前状态相同的示例——状态变了，旧答案就是错答案。
+        # 空缓存（或同状态无示例）时 format_examples() 返回空串，提示
+        # 与原来一字不差。
+        full = self.memory.format_examples(state=self.state.summary()) + prompt
+        if self.register:
+            # 寄存器原型：地点句原样复制到提示最前面，记忆示例之前。
+            full = self.register_line() + "\n" + full
         ids = self.tok.encode(full, add_bos=True)
         if self.tok.UNK in ids:
             print("WARN: UNK in prompt", flush=True)
@@ -235,9 +257,12 @@ def main():
     ap.add_argument("--persona", default="omega")
     ap.add_argument("--intent", default="")
     ap.add_argument("--max-new", type=int, default=24)
+    ap.add_argument("--register", action="store_true",
+                    help="寄存器原型：地点句原样复制到提示最前面")
     args = ap.parse_args()
     ckpt = args.ckpt or latest_product()
-    sc = Sidecar(args.dir, ckpt, args.persona, args.intent, args.max_new)
+    sc = Sidecar(args.dir, ckpt, args.persona, args.intent, args.max_new,
+                 register=args.register)
     sc.run(args.steps)
 
 

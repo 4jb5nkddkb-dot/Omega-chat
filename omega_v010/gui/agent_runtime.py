@@ -62,7 +62,8 @@ class CognitiveMemoryBuffer:
     容量默认 3，满了丢最旧的；同状态同提问去重（新纪录顶掉旧的）。
 
     纯标准库，不碰模型权重，不改推理路径——调用方只在组装提示时
-    把 format_examples() 拼在提示最前面，判卷答对时调 add_success()。
+    把 format_examples(state=当前状态摘要) 拼在提示最前面，判卷答对
+    时调 add_success()；状态变了，旧示例不拼。
     """
 
     def __init__(self, capacity: int = 3):
@@ -85,19 +86,25 @@ class CognitiveMemoryBuffer:
         """缓存内容的副本（供日志存档导出用，不含任何推理状态）。"""
         return [dict(it) for it in self._items]
 
-    def format_examples(self, max_chars: int = 64) -> str:
+    def format_examples(self, max_chars: int = 64, state=None) -> str:
         """拼提示用的示例块：每条一行“提问＋正确回复”，空缓存返回空串。
 
-        不带状态摘要是故意的：例子只教格式（短句直答），地点以当前
-        摘要为准；带摘要的例子会把旧地点塞进上下文，模型容易照抄。
-        也不加标题行：标题会引入提示里原本没有的新字符，示例行本身
-        就是现成的提问与回复，不需要额外解释。单条超长时截断到
-        max_chars（优先在句号处断，不断就硬断），防止提示无限膨胀。
+        state 给出时，只拼与当前状态摘要相同的示例——状态一变，旧答
+        案就是错答案（s2100 因果复测：记忆开 4/7、关 7/7；第 11、12
+        步同一状态，只隔一步答案就翻了，两步之间唯一变的，是缓存多
+        了一条示例）。state 为空时保持老行为（全拼），供不需要状态
+        的调用方和旧测试用。示例行本身不带状态摘要：例子只教格式
+        （短句直答），地点以当前摘要为准；也不加标题行：标题会引入
+        提示里原本没有的新字符。单条超长时截断到 max_chars（优先在
+        句号处断，不断就硬断），防止提示无限膨胀。
         """
-        if not self._items:
+        items = self._items
+        if state is not None:
+            items = [it for it in items if it["state"] == str(state)]
+        if not items:
             return ""
         lines = []
-        for it in self._items:
+        for it in items:
             line = f"{it['prompt']}{it['reply']}"
             if len(line) > max_chars:
                 cut = line.rfind("。", 0, max_chars)

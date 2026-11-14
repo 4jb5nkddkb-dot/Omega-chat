@@ -67,8 +67,10 @@ class Game:
 
     def generate(self, prompt, max_new):
         # 在线记忆防复读：把缓存的答对示例拼在提示最前面，再送入模型。
-        # 空缓存时 format_examples() 返回空串，提示与原来一字不差。
-        prefix = self.memory.format_examples()
+        # 只拼与当前状态相同的示例——状态变了，旧答案就是错答案。
+        # 空缓存（或同状态无示例）时 format_examples() 返回空串，提示
+        # 与原来一字不差。
+        prefix = self.memory.format_examples(state=self.state.summary())
         full = prefix + prompt
         self._last_turn = {"prompt": full, "base_prompt": prompt,
                            "memory_examples": self.memory.examples()}

@@ -80,14 +80,15 @@ def world_turn(model, router, state, prompt, *, self_state=None,
     SelfState 在回合之间 set_persona/set_intent，锚点行随之换。
     提示结构与锚点探针一致：锚点行 + "\\n" + 摘要 + "\\n" + 用户话。
     memory 为 agent_runtime.CognitiveMemoryBuffer 时：推理前把缓存的
-    答对示例拼在提示最前面；本轮被接受且无矛盾标记时，把（状态摘要，
+    答对示例拼在提示最前面（只拼与当前状态摘要相同的示例，状态变了
+    旧示例不拼）；本轮被接受且无矛盾标记时，把（状态摘要，
     用户话，模型回复）写进缓存。memory=None 时行为与原来完全一致。
     """
     if self_state is None:
         self_state = wa.SelfState()
     full_prompt = wa.anchor_prompt(self_state, state) + "\n" + prompt
     if memory is not None:
-        full_prompt = memory.format_examples() + full_prompt
+        full_prompt = memory.format_examples(state=state.summary()) + full_prompt
     result = ar.run_agent(model, router, full_prompt, _accept_any,
                           max_new=max_new, max_turns=max_turns,
                           governance=governance, token_provider=token_provider)
