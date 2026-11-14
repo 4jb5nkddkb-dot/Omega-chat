@@ -18,8 +18,12 @@
 - **问问题**：4 道自态问题按钮，或自己打字问。
 - **人格**：下拉换 omega / 紫薇 / 悟空 / 一一 / Dayan，意图框写一句
   想干的事，点应用。
-- **自动玩 12 步**：按内核的四个动作（observe / explore / exploit /
-  stabilize）轮着走，看着它自己玩；点“停”随时停。
+- **内核自动玩 12 步**：点“内核自动玩 12 步”，桥接器把每步的接地
+  分交给内核，内核逐步选出下一个动作（observe / explore / exploit /
+  stabilize），不再固定轮换；点“停”随时停。每一步的动作、接地分
+  和回复都记进 `dialog_log.jsonl`（动作名前带 `[内核]`），桥接器那
+  边另有 `run_kernel/` 里的审计记录。自动玩需要界面旁有桥接器
+  （`omega-world-bridge`）：没有找到时会自动玩会明说，不启动。
 - **接地计分**：每句模型回话都当场判对错（和世界状态对不对得上），
   顶上实时显示“答对 x / y”。对话默认存进 `dialog_log.jsonl`
   （可关；写失败会警告一次并自动暂停，不会打断玩）。
@@ -38,13 +42,19 @@
 
 ## 诚实说明
 
-- 自动玩的动作轮换是按内核动作形状排的，还**不是**真正的内核在选
-  （真正的桥接器是 `omega-world-bridge`，Linux 二进制在 v0.1.0
-  Release 里；Windows 版以后再编——没在真 Windows 上跑过的二进制
-  不发）。
+- 内核自动玩每一步的动作都是桥接器里的内核选的（工作台上用 Linux
+  桥接器验过 12 步，见 `V010_KERNEL_AUTOPLAY_REPORT.md`）；但 Windows
+  版桥接器二进制没有随包带——没在真 Windows 上跑过的二进制不发，
+  所以 Windows 上点自动玩会提示没有找到桥接器。手动查看、移动、
+  拾取和对话不受影响。
+- 内核只选动作，不自己改策略（`omega.toml` 里 `self_modify_enabled
+  = false`）；每步只放行白名单动作（observe / explore / exploit /
+  stabilize / noop）。
 - 模型现在世界问答上经常答错地点（12 步 demo 里 12/12 错），
   答对答错都会原样显示——这就是这个 GUI 要量的东西。
 - 文件夹是自包含的：`world_state.py`、`world_anchor.py`、
   `world_loop.py`、`world_self_probe.py`、`agent_runtime.py`、
   `dual_transformer_numpy.py` 都是随包带的版本，和工作台验证过的
-  组合一致；不要单独混用别处的同名文件。
+  组合一致；不要单独混用别处的同名文件。新增的 `kernel_autoplay.py`
+  是纯标准库的桥接器驱动（启动桥接器进程、读写交换文件），`omega.toml`
+  是桥接器配置。

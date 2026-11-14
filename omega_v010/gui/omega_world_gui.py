@@ -9,8 +9,11 @@
   - 走动：7 个地点按钮，人物会跟你走，昼夜每 4 步一翻。
   - 查看 / 拾取 / 对话：可见物品和在场人物都是按钮，点就行。
   - 问问题：4 道自态问题按钮，或自己打字问。
-  - 自动玩：按内核的四个动作（observe / explore / exploit /
-    stabilize）轮着走 12 步，看着它自己玩。
+  - 自动玩：按“自动玩 12 步”，桥接器把每步的接地分交给内核，内核逐
+    步选出下一个动作（observe / explore / exploit / stabilize），不
+    再固定轮换。需要界面旁有桥接器（omega-world-bridge）；没有找到
+    时自动玩会明说，不会悄悄轮换。桥接器的配置（omega.toml）保持
+    self_modify 关闭：内核只选动作，不自己改策略。
   - 接地计分：每句模型回话都当场判对错（和世界状态对不对得上），
     答对数实时显示；对话默认存进 dialog_log.jsonl（可关）。
 
@@ -31,6 +34,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 import agent_runtime as ar
+import kernel_autoplay as ka
 import world_anchor as wa
 import world_loop as wl
 import world_state as ws
@@ -38,7 +42,6 @@ import world_self_probe as wsp
 
 PERSONAS = ["omega", "紫薇", "悟空", "一一", "Dayan"]
 LOCATIONS = ["花果山", "水帘洞", "高老庄", "流沙河", "取经路", "南海", "天宫"]
-AUTO_ACTIONS = ["observe", "explore", "exploit", "stabilize"]
 AUTO_STEPS = 12
 
 
@@ -52,9 +55,10 @@ class Game:
         self.me = wa.SelfState()
         self.qi = 0
         self.loc_idx = 4  # 取经路在轮换表里的位置
-        self.auto_idx = 0
         self.correct = 0
         self.total = 0
+        self.last_reply = ""  # 上一步模型回话（内核自动玩的观察用）
+        self.last_err = 0.0  # 上一步接地分（内核自动玩的观察用）
         self.archive_path = HERE / "dialog_log.jsonl"
         self.archive_on = True
         self.archive_warned = False
@@ -132,9 +136,28 @@ class Game:
             self._remember(f"和{name}说说话。", cont)
         return cont, (1.0 if flags else 0.0), "; ".join(flags)
 
-    def auto_step(self):
-        action = AUTO_ACTIONS[self.auto_idx % len(AUTO_ACTIONS)]
-        self.auto_idx += 1
+    def observation(self, step):
+        """当前世界快照，写给桥接器看：和 v0.1.0 sidecar 的 observation
+        同格式，内核据此选下一步动作。"""
+        return {"step": step,
+                "location": self.state.visitor_location,
+                "time_step": self.state.time_step,
+                "daynight": self.state.day_night(),
+                "present": self.state.present_characters(),
+                "visible": self.state.present_items(),
+                "carried": self.state.carried_items(),
+                "persona": self.me.persona if hasattr(self.me, "persona") else "omega",
+                "intent": getattr(self.me, "intent", ""),
+                "last_reply": self.last_reply,
+                "grounded_error": self.last_err,
+                "world_summary": self.state.summary()}
+
+    def run_kernel_action(self, action):
+        """执行内核选出的一个动作；返回 (label, reply, err, note)。
+
+        每个动作的做法和旧版固定轮换那一支一字不差，唯一的区别是动作
+        来自内核，不再按固定顺序轮换。白名单外的动作一律按 noop 处理：
+        什么都不做，接地分记 0。"""
         if action in ("observe", "stabilize"):
             qi = self.qi % len(wsp.QUESTIONS)
             self.qi += 1
@@ -149,16 +172,18 @@ class Game:
                     break
             reply, err, note = self.move(dest)
             return f"[explore] 去{dest}", reply, err, note
-        visible = self.state.present_items()
-        if visible:
-            reply, err, note = self.take(visible[0])
-            return f"[exploit] 拾取{visible[0]}", reply, err, note
-        present = self.state.present_characters()
-        if present:
-            reply, err, note = self.talk(present[0])
-            return f"[exploit] 和{present[0]}说话", reply, err, note
-        reply, err, note = self.ask(1)
-        return "[exploit] 问在场人物", reply, err, note
+        if action == "exploit":
+            visible = self.state.present_items()
+            if visible:
+                reply, err, note = self.take(visible[0])
+                return f"[exploit] 拾取{visible[0]}", reply, err, note
+            present = self.state.present_characters()
+            if present:
+                reply, err, note = self.talk(present[0])
+                return f"[exploit] 和{present[0]}说话", reply, err, note
+            reply, err, note = self.ask(1)
+            return "[exploit] 问在场人物", reply, err, note
+        return "[noop]", "", 0.0, "noop"
 
     def record(self, action, reply, err, note=""):
         self.total += 1
@@ -207,6 +232,7 @@ class App:
         self.busy = False
         self.auto_running = False
         self.auto_left = 0
+        self.driver = None  # 内核自动玩的桥接器驱动（未启动时为空）
         self._build()
         self._set_status("正在准备…")
         self.root.after(200, lambda: self._startup(ckpt))
@@ -271,7 +297,7 @@ class App:
 
         bf = ttk.Frame(self.root)
         bf.pack(fill="x", padx=8, pady=6)
-        self.auto_btn = ttk.Button(bf, text="自动玩 12 步", command=self._auto_start)
+        self.auto_btn = ttk.Button(bf, text="内核自动玩 12 步", command=self._auto_start)
         self.auto_btn.pack(side="left", padx=2)
         self.stop_btn = ttk.Button(bf, text="停", command=self._auto_stop, state="disabled")
         self.stop_btn.pack(side="left", padx=2)
@@ -385,38 +411,98 @@ class App:
         self._do(f"问：{text}", lambda: self.game.ask_free(text))
 
     def _auto_start(self, steps=AUTO_STEPS):
+        """内核自动玩：每一步由桥接器里的内核按接地分选动作。
+
+        没有桥接器就明说、不启动——固定轮换已经拿掉，不会悄悄轮换。
+        手动查看、移动、拾取和对话不受影响。"""
         if not self.game or self.auto_running:
+            return
+        bridge = ka.find_bridge()
+        if bridge is None:
+            messagebox.showinfo(
+                "内核自动玩",
+                "界面旁没有找到桥接器（omega-world-bridge），这一步没法"
+                "由内核选，所以自动玩没有启动。\n\n手动查看、移动、拾取"
+                "和对话不受影响。")
+            self._set_status("自动玩未启动：没有找到桥接器。")
+            return
+        self.driver = ka.KernelDriver(HERE / "run_kernel", steps=steps,
+                                      bridge=bridge)
+        try:
+            self.driver.start()
+        except Exception as e:
+            messagebox.showerror("内核自动玩", f"桥接器启动失败：\n{e}")
             return
         self.auto_running = True
         self.auto_left = steps
+        self._k_step = 1
+        self._k_deadline = time.time() + ka.ACTION_TIMEOUT_SECS
         self.auto_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
-        self.auto_var.set(f"自动玩：剩 {self.auto_left} 步")
-        self._auto_step()
+        self.auto_var.set(f"内核自动玩：剩 {self.auto_left} 步")
+        self.game.last_reply = ""
+        self.game.last_err = 0.0
+        self.driver.write_observation(self.game.observation(0))
+        self._log("内核自动玩开始：每一步由内核按接地分选。")
+        self._kernel_tick()
 
-    def _auto_step(self):
-        if not self.auto_running or self.auto_left <= 0:
-            self._auto_stop()
+    def _kernel_tick(self):
+        """一轮内核自动玩的心跳（after 驱动，不卡界面）：
+        等内核给动作 -> 执行 -> 把新状态和接地分交回桥接器 -> 下一步。"""
+        if not self.auto_running:
+            return
+        if self.auto_left <= 0:
+            self._kernel_finish()
+            return
+        if not self.driver.alive():
+            self._log("桥接器已退出，自动玩停止。")
+            self._kernel_finish()
+            return
+        step = self._k_step
+        action = self.driver.read_action(step)
+        if action is None:
+            if time.time() > self._k_deadline:
+                self._log(f"第 {step} 步：等不到内核的动作，自动玩停止。")
+                self._kernel_finish()
+                return
+            self.root.after(200, self._kernel_tick)
             return
         if self.busy:
-            self.root.after(300, self._auto_step)
+            self.root.after(300, self._kernel_tick)
             return
-        label, reply, err, note = self.game.auto_step()
-        self.game.record(label, reply, err, note)
+        raw = self.driver.last_raw_action
+        label, reply, err, note = self.game.run_kernel_action(action)
+        self.game.last_reply = reply
+        self.game.last_err = err
+        # 先写新状态的观察，再写本步的结果：桥接器下一步读到的永远是新状态。
+        self.driver.write_observation(self.game.observation(step))
+        self.driver.write_outcome(step, action, reply, err, note)
+        self.driver.record_step(step, action, err, reply)
+        self.game.record(f"[内核]{label}", reply, err, note)
         mark = "✓ 答对" if err == 0.0 else "✗ 答错"
-        self._log(f"自动 {label}")
+        extra = f"（内核给了白名单外的动作 {raw}，按 noop 处理）" if raw != action else ""
+        self._log(f"内核选了 {action}：{label}{extra}")
         self._log(f"欧米伽：{reply}  [{mark}]" + (f"（{note}）" if note else ""))
         self.auto_left -= 1
-        self.auto_var.set(f"自动玩：剩 {self.auto_left} 步")
+        self._k_step += 1
+        self._k_deadline = time.time() + ka.ACTION_TIMEOUT_SECS
+        self.auto_var.set(f"内核自动玩：剩 {self.auto_left} 步")
         self._refresh_world()
-        self.root.after(1200, self._auto_step)
+        self.root.after(1200, self._kernel_tick)
 
-    def _auto_stop(self):
+    def _kernel_finish(self):
         self.auto_running = False
+        if getattr(self, "driver", None) is not None:
+            self.driver.stop()
+            self.driver = None
         self.auto_btn.configure(state="normal")
         self.stop_btn.configure(state="disabled")
         self.auto_var.set("")
         self._set_status("就绪。")
+        self._log(f"内核自动玩结束：答对 {self.game.correct} / {self.game.total}。")
+
+    def _auto_stop(self):
+        self._kernel_finish()
 
 
 def main():
