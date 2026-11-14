@@ -15,6 +15,15 @@ noop and noted. The bridge's config (omega.toml, next to this file)
 keeps self_modify off: the kernel only selects, it never rewrites
 its own strategy.
 
+Experiment A (verified on the workbench 2026-11-14, s2100: step 1
+stabilize, steps 2-12 explore 11/11, grounded 12/12) is wired in
+below: the driver passes --stab-weight 0.5 --explore-bonus 1.5
+--explore-weight 2.5 to the bridge. Without those flags the kernel
+only ever picks stabilize (a correct stabilize answer keeps raising
+its weight x1.05 per success, while explore is never registered, so
+set_strategy_weight("explore", _) silently returns false) and the
+world never moves.
+
 The bridge binary is NOT bundled with the GUI. On Windows there is
 no bridge binary that has ever run on real Windows, so none is
 shipped: with no bridge next to the GUI, kernel auto-play reports
@@ -92,6 +101,11 @@ class KernelDriver:
                "--steps", str(self.steps), "--goal", self.goal]
         if Path(self.config).is_file():
             cmd += ["--config", self.config]
+        # Experiment A (see module docstring): pin stabilize's weight
+        # down and explore's bonus up so the kernel actually moves.
+        cmd += ["--stab-weight", "0.5",
+                "--explore-bonus", "1.5",
+                "--explore-weight", "2.5"]
         print(f"kernel driver: {' '.join(cmd)}", flush=True)
         self.proc = subprocess.Popen(cmd, stdout=self._logf,
                                      stderr=subprocess.STDOUT)

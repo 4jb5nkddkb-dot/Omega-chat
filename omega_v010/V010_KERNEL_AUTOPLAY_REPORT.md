@@ -91,3 +91,30 @@
 - 界面改动：`omega_v010/gui/kernel_autoplay.py`（新增，纯标准库桥接器
   驱动）、`omega_world_gui.py`（自动玩改内核选步）、`omega.toml`
   （新增，桥接器配置，self_modify 关闭）、`README.md`（说明更新）
+
+## 实验 A：让内核动起来（2026-11-14）
+
+问题：上面两轮里内核 12/12 全选 stabilize，世界一次没动。机制已核实
+（0.5.6 源码）：桥接器只调 record_reward，从不调 set_strategy_weight；
+stabilize 答对就加分，权重越成功越高（每次 ×1.05），越选越稳；
+max_risk=0.65 时 stabilize +0.315、explore −0.42，不确定高时再 +0.8/−0.2。
+
+做法：桥接器新增 --stab-weight / --explore-bonus / --explore-weight
+（可选，不传就是老行为）。每步后把 stabilize 权重钉到 0.5，把
+RuleEffect.explore_bonus 钉到 1.5。explore 自身权重钉不了——策略要被
+选过一次才登记，没登记时 set_strategy_weight 静默返回 false（开跑前
+试调返回 registered=false，实锤），所以 bonus 才是能动的杠杆。剂量
+算出来的：stabilize 0.5 时 explore 的 bonus 要过 1.235 才翻得过
+stabilize、过 1.0075 才翻得过 observe，1.5 是上限，不算温和。
+
+验证（工作台）：s2100 12 步环，第 1 步 stabilize，第 2–12 步 explore
+11/11，接地 12/12，世界每步都动。GUI 驱动（kernel_autoplay.py）同样
+接参后复测：s1500 12 步，stabilize + explore 11，接地 11/12（第 1 步
+是 s1500 自己的问答错），全部检查通过。注意 12/12 测的是到达叙述，
+探针问答那面是因果探针单独验的（s2700 7/7）。
+
+发版：桥接器 + GUI 驱动推仓库，Windows .exe 重编后直接发给用户
+（不在仓库、不在 release）。寄存器接线的三个文件
+（generalist_pilot_train.py、register_format_records.jsonl、
+GENERALIST_CORPUS.md）同批补推——之前记录误写已推过，实际未推，
+这次一起补上。

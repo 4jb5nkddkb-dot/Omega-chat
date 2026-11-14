@@ -1,6 +1,6 @@
 //! omega-world-bridge — Rust side of the Omega v0.1.0 closed loop.
 //!
-//! The kernel (omega-cognitive-kernel, pinned tag v0.4.7) runs the
+//! The kernel (omega-cognitive-kernel, crates.io 0.5.6) runs the
 //! L0/L1/L2 cognition. This binary injects the real world into it:
 //!   * FileWorldObserver — reads observation.json written by the Python
 //!     sidecar (world summary + model reply + grounded error score).
@@ -12,6 +12,20 @@
 //! channel. L1 self-modification stays OFF (omega.toml); the loop
 //! still learns through strategy weights + case memory + L2 nudges,
 //! and everything is audited (audit.jsonl / trajectory.jsonl).
+//!
+//! Experiment A (workbench only): the kernel only ever picks stabilize,
+//! because a stabilize success keeps raising its weight (x1.05 per
+//! success) while explore is never registered, so
+//! `set_strategy_weight("explore", _)` silently returns false.
+//! Optional flags pin the levers after each step:
+//!   --stab-weight <f64>     pin stabilize's weight (registered, works)
+//!   --explore-bonus <f64>   pin RuleEffect.explore_bonus (clamped
+//!                           [-1.5, 1.5]; the lever that can actually
+//!                           move explore, since its weight is unpinned)
+//!   --explore-weight <f64>  one pre-loop set_strategy_weight("explore")
+//!                           attempt, logged (expected false until
+//!                           explore has been taken once).
+//! Without the flags the loop behaves exactly as before.
 
 use omega_cognitive_kernel::{
     Kernel, KernelConfig, OmegaError, Result,
@@ -107,6 +121,9 @@ fn main() -> Result<()> {
     let mut goal = "act coherently in the little world as Omega".to_string();
     let mut config: Option<PathBuf> = None;
     let mut state: Option<PathBuf> = None;
+    let mut stab_weight: Option<f64> = None;
+    let mut explore_bonus: Option<f64> = None;
+    let mut explore_weight: Option<f64> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -128,6 +145,18 @@ fn main() -> Result<()> {
             }
             "--state" => {
                 state = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--stab-weight" => {
+                stab_weight = args[i + 1].parse().ok();
+                i += 2;
+            }
+            "--explore-bonus" => {
+                explore_bonus = args[i + 1].parse().ok();
+                i += 2;
+            }
+            "--explore-weight" => {
+                explore_weight = args[i + 1].parse().ok();
                 i += 2;
             }
             _ => {
@@ -160,6 +189,20 @@ fn main() -> Result<()> {
     println!("steps  : {steps}");
     println!("state  : {}", state_path.display());
     println!("self_modify: {}", kernel.inner.l1.self_modify_enabled);
+    if let Some(ew) = explore_weight {
+        // Diagnostic: explore is unregistered until taken once, so this
+        // is expected to return false on a fresh state. Logged, not fatal.
+        let ok = kernel.set_strategy_weight("explore", ew);
+        println!("pin    : pre-loop set explore weight {ew} -> registered={ok}");
+    }
+    if let Some(b) = explore_bonus {
+        let b = b.clamp(-1.5, 1.5);
+        kernel.inner.l0.memory.cognitive_effect.explore_bonus = b;
+        println!("pin    : explore_bonus={b}");
+    }
+    if let Some(sw) = stab_weight {
+        println!("pin    : stabilize weight={sw} (applied after each step)");
+    }
 
     for step in 1..=steps {
         let r = kernel.step(&goal)?;
@@ -182,9 +225,20 @@ fn main() -> Result<()> {
         };
         let reward = (1.0 - gerr).clamp(0.0, 1.0);
         kernel.inner.l0.memory.record_reward(&action, reward);
+        // Experiment A pins (after each step, so the kernel's own
+        // absorb/bump learning cannot drift them back mid-run).
+        let mut pin_note = String::new();
+        if let Some(sw) = stab_weight {
+            let ok = kernel.set_strategy_weight("stabilize", sw);
+            pin_note.push_str(&format!(" pin_stab={ok}"));
+        }
+        if let Some(b) = explore_bonus {
+            kernel.inner.l0.memory.cognitive_effect.explore_bonus = b.clamp(-1.5, 1.5);
+            pin_note.push_str(&format!(" pin_bonus={}", b.clamp(-1.5, 1.5)));
+        }
         let _ = fs::remove_file(dir.join("outcome.json"));
         println!(
-            "step {step:>2} | act={action:<9} | grounded_err={gerr:.2} reward={reward:.2} | avg_err={:.3} damp={:.2} patched={} | reply={reply}",
+            "step {step:>2} | act={action:<9} | grounded_err={gerr:.2} reward={reward:.2} | avg_err={:.3} damp={:.2} patched={}{pin_note} | reply={reply}",
             kernel.inner.l0.memory.cas.avg_prediction_error,
             kernel.inner.l0.memory.cognitive_effect.error_damping,
             r.l1.patched,

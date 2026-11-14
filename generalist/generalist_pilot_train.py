@@ -113,7 +113,7 @@ def domain_texts(tok):
     # v10（2026-11-12，用户选 B＋探针格式）：加探针格式记录 600 条
     # （摘要＋探针原问＋标准答案，无锚定行、无“问：”包装，与循环探针同格式）
     for name in ("world_tool_records_v9.jsonl", "self_report_records_v9.jsonl",
-                 "probe_format_records.jsonl"):
+                 "probe_format_records.jsonl", "register_format_records.jsonl"):
         for line in open(HERE / name, encoding="utf-8"):
             world.append(json.loads(line)["text"])
     texts["世界"] = "\n".join(world)
