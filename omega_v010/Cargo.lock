@@ -504,8 +504,9 @@ dependencies = [
 
 [[package]]
 name = "omega-cognitive-kernel"
-version = "0.4.7"
-source = "git+https://github.com/4jb5nkddkb-dot/omega-cognitive-kernel?tag=v0.4.7#bfb5b25f7409de4ce84d6e8ef3e35e87270b8f1b"
+version = "0.5.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2edfeca63847f33fb6b90b002572a54fb3c19447076faff94fc2f6fe49baac8d"
 dependencies = [
  "anyhow",
  "chrono",

@@ -6,6 +6,6 @@ description = "Omega v0.1.0: Rust bridge between the omega-cognitive-kernel and 
 license = "MIT"
 
 [dependencies]
-omega-cognitive-kernel = { git = "https://github.com/4jb5nkddkb-dot/omega-cognitive-kernel", tag = "v0.4.7" }
+omega-cognitive-kernel = "0.5.6"
 serde_json = "1"
 chrono = "0.4"
