@@ -44,7 +44,7 @@ jobs:
         run: |
           $id = "${{ vars.MODEL_FILE_ID }}"
           if (-not $id) { throw "MODEL_FILE_ID repository variable is not set" }
-          gdown --id $id -O "omega_v010/packaging/${{ inputs.model_file }}"
+          gdown $id -O "omega_v010/packaging/${{ inputs.model_file }}"
 
       - name: PyInstaller onedir
         env:
