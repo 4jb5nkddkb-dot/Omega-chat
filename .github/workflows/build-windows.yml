@@ -1,0 +1,74 @@
+# Builds the Omega small-world Windows installer on windows-latest:
+#   PyInstaller onedir (GUI) + cargo bridge + Inno Setup installer + plain zip.
+# Manual trigger only (workflow_dispatch). The model .npz is NOT in the repo
+# (.gitignore): when bundle_model is true, the job downloads it from the
+# Drive share link stored as repository variable MODEL_FILE_ID (anyone-with-link);
+# when false, the installer ships without a model and the GUI opens its
+# file picker on first run. Nothing here publishes to itch.io — the
+# installer + zip come back as workflow artifacts for a human to upload.
+name: build-windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_model:
+        description: "Bundle the model .npz inside the installer (else picker on first run)"
+        type: boolean
+        default: true
+      model_file:
+        description: "Model filename to bundle (must sit next to the spec after download)"
+        default: "generalist2_s5100.npz"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PyInstaller + numpy + gdown
+        run: pip install pyinstaller numpy gdown
+
+      - name: Build the Rust bridge
+        run: cargo build --release --manifest-path omega_v010/Cargo.toml
+
+      - name: Download the model (bundled builds only)
+        if: ${{ inputs.bundle_model }}
+        run: |
+          $id = "${{ vars.MODEL_FILE_ID }}"
+          if (-not $id) { throw "MODEL_FILE_ID repository variable is not set" }
+          gdown --id $id -O "omega_v010/packaging/${{ inputs.model_file }}"
+
+      - name: PyInstaller onedir
+        env:
+          OMEGA_BUNDLE_MODEL: ${{ inputs.bundle_model && '1' || '0' }}
+          OMEGA_MODEL_FILE: ${{ inputs.model_file }}
+        run: pyinstaller omega_v010/packaging/omega_world.spec --distpath dist --workpath build
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+        shell: cmd
+
+      - name: Build the installer
+        run: |
+          $define = if ("${{ inputs.bundle_model }}" -eq "true") { "/DBUNDLE_MODEL=1" } else { "/DBUNDLE_MODEL=0" }
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" $define "/DMODEL_FILE=${{ inputs.model_file }}" omega_v010/packaging/omega_world.iss
+        shell: pwsh
+
+      - name: Zip the plain folder (no-install fallback)
+        run: Compress-Archive -Path dist/OmegaWorld -DestinationPath installer-out/OmegaWorld-0.1.0-folder.zip
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: OmegaWorld-windows-0.1.0
+          path: |
+            installer-out/OmegaWorld-Setup-0.1.0.exe
+            installer-out/OmegaWorld-0.1.0-folder.zip
