@@ -20,7 +20,7 @@ AppVersion={#AppVersion}
 DefaultDirName={localappdata}\OmegaWorld
 DefaultGroupName=Omega 小世界
 PrivilegesRequired=lowest
-OutputDir=..\installer-out
+OutputDir=..\..\installer-out
 OutputBaseFilename=OmegaWorld-Setup-{#AppVersion}
 Compression=lzma2
 SolidCompression=yes
@@ -28,7 +28,7 @@ WizardStyle=modern
 UninstallDisplayName=Omega 小世界
 
 [Files]
-Source: "..\dist\OmegaWorld\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
+Source: "..\..\dist\OmegaWorld\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 
 [Icons]
 #if BundleModel == "1"
