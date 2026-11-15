@@ -2,8 +2,9 @@ __pycache__/
 *.pyc
 .DS_Store
 
-# weights / checkpoints — never publish model files
+# weights / checkpoints / binaries — never publish model files or built binaries
 *.npz
+*.exe
 
 # local secrets
 .env
