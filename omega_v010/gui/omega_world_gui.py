@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Omega 小世界 GUI v0.1.0 — Windows 可玩版。
+"""Omega 小世界 GUI v0.1.1 — Windows 可玩版。
 
 纯标准库 tkinter + NumPy，双击 run_gui.bat 运行；启动时选一个模型
 产品 .npz（全能线任意一块都行，Drive 备份里的 s57300 就行）。
@@ -222,7 +222,7 @@ class Game:
 class App:
     def __init__(self, root, ckpt=None):
         self.root = root
-        self.root.title("Omega 小世界 v0.1.0")
+        self.root.title("Omega 小世界 v0.1.1")
         self.root.geometry("780x760")
         try:
             import tkinter.font as tkfont
