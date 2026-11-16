@@ -24,17 +24,17 @@ its weight x1.05 per success, while explore is never registered, so
 set_strategy_weight("explore", _) silently returns false) and the
 world never moves.
 
-The bridge binary is NOT bundled with the GUI. On Windows there is
-no bridge binary that has ever run on real Windows, so none is
-shipped: with no bridge next to the GUI, kernel auto-play reports
-that instead of silently falling back to a fixed rotation (which no
-longer exists). On the workbench, point OMEGA_BRIDGE at the Linux
-bridge binary to run it.
+The bridge binary ships next to the GUI (Windows: _internal/omega-world-bridge.exe,
+verified running on real Windows 2026-11-15). With no bridge next to the GUI,
+kernel auto-play reports that instead of silently falling back to a fixed
+rotation (which no longer exists). On the workbench, point OMEGA_BRIDGE at the
+Linux bridge binary to run it.
 """
 import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -42,6 +42,30 @@ HERE = Path(__file__).resolve().parent
 WHITELIST = ["observe", "explore", "exploit", "stabilize", "noop"]
 BRIDGE_ENV = "OMEGA_BRIDGE"
 ACTION_TIMEOUT_SECS = 300
+# 视频接地账本（grounding_ledger.jsonl，见 omega_v010/GROUNDING_LEDGER.md）。
+# 消费端只读它，从不写它；账本本身仍由 verify_to_grounding.py 写。
+VIDEO_GROUNDING_LEDGER = HERE.parent / "grounding_ledger.jsonl"
+
+
+def load_video_grounding(ledger_path=None):
+    """读视频接地账本，返回摘要 dict，读不到时返回 None，绝不抛错。
+
+    摘要见 grounding_ledger.summarize：{episodes, n, mean_reward,
+    min_reward, worst, latest}。账本不存在、读不出、或全部是坏行时
+    返回 None——消费端缺失不是启动失败，驱动照常跑，只是不带视频侧状态。
+    """
+    try:
+        parent = Path(__file__).resolve().parent.parent
+        if str(parent) not in sys.path:
+            sys.path.insert(0, str(parent))
+        import grounding_ledger as _gl
+        path = Path(ledger_path) if ledger_path else VIDEO_GROUNDING_LEDGER
+        rows, _skipped, _notes = _gl.load_ledger(path)
+        if not rows:
+            return None
+        return _gl.summarize(rows)
+    except Exception:
+        return None
 
 
 def find_bridge():
@@ -78,6 +102,38 @@ class KernelDriver:
         self._logf = None
         self.steps_log = []
         self.last_raw_action = None
+        # 视频接地摘要（load_video_grounding_history 填入）；None 表示
+        # 账本不可用。只读，不参与任何 step 的 reward 或决策。
+        self.video_grounding = None
+
+    def load_video_grounding_history(self, ledger_path=None):
+        """读视频接地账本，写 run 目录的 history 文件并记一行驱动日志。
+
+        可单独调用（不启动桥），start() 也会调它。绝不抛错：
+        账本缺失或全坏时返回 None，删掉可能残留的旧 history 文件，
+        记一行 `video_grounding: none`，驱动照常启动。
+        成功时写 video_grounding_history.json（注意它不在 start() 的
+        清理名单里，写入发生在清理之后，所以不会被下一轮清掉），
+        并记一行 `video_grounding: episodes=N mean_reward=X.XX worst=EP(R)`。
+        """
+        summary = load_video_grounding(ledger_path)
+        if summary is None:
+            self.video_grounding = None
+            try:
+                (self.dir / "video_grounding_history.json").unlink()
+            except (FileNotFoundError, OSError):
+                pass
+            print("video_grounding: none", flush=True)
+            return None
+        self.video_grounding = summary
+        self.dir.mkdir(parents=True, exist_ok=True)
+        write_json(self.dir / "video_grounding_history.json", summary)
+        worst = summary["worst"]
+        print("video_grounding: episodes=%d mean_reward=%.2f worst=%s(%.2f)"
+              % (summary["n"], summary["mean_reward"],
+                 worst["episode"], worst["reward"]),
+              flush=True)
+        return summary
 
     def start(self):
         if self.bridge is None:
@@ -96,6 +152,10 @@ class KernelDriver:
             (self.dir / "gui_kernel_steps.jsonl").unlink()
         except FileNotFoundError:
             pass
+        # 视频接地历史：清理之后再写（video_grounding_history.json 不在
+        # 上面的清理名单里，写完也不会被下一轮 start() 清掉）。读不到账本
+        # 时只记一行 none，不阻断启动。
+        self.load_video_grounding_history()
         self._logf = open(self.dir / "bridge.log", "w", encoding="utf-8")
         cmd = [self.bridge, "--dir", str(self.dir),
                "--steps", str(self.steps), "--goal", self.goal]
@@ -107,11 +167,26 @@ class KernelDriver:
                 "--explore-bonus", "1.5",
                 "--explore-weight", "2.5"]
         print(f"kernel driver: {' '.join(cmd)}", flush=True)
+        # Windows: the bridge is a console-subsystem exe; without this it
+        # pops a black console window over the GUI (seen on real Windows
+        # 2026-11-15). CREATE_NO_WINDOW keeps it invisible; its stdout
+        # still goes to bridge.log.
+        popen_kwargs = {}
+        if sys.platform == "win32":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         self.proc = subprocess.Popen(cmd, stdout=self._logf,
-                                     stderr=subprocess.STDOUT)
+                                     stderr=subprocess.STDOUT, **popen_kwargs)
         return self.proc
 
     def write_observation(self, obs):
+        # video_grounding：视频侧状态的只读搬运。桥的 FileWorldObserver
+        # 用 serde_json::Value 整文件通读，多余字段原样带过、不报错，所以
+        # 加这个顶层字段在传输上是安全的。但内核策略代码目前不读任何视频
+        # 字段——它只是让每一轮的 observation 都带上视频接地历史，以后有
+        # 规则要用时不用再接线。它不改 outcome、step reward 或任何决策。
+        if getattr(self, "video_grounding", None) is not None:
+            obs = dict(obs)
+            obs["video_grounding"] = self.video_grounding
         write_json(self.dir / "observation.json", obs)
 
     def write_outcome(self, step, action, reply, err, note=""):
