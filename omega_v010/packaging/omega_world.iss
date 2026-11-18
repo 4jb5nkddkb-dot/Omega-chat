@@ -1,4 +1,4 @@
-; Omega small world — Inno Setup script (v0.1.1).
+; Omega small world — Inno Setup script (v0.1.2).
 ; Built on windows-latest by .github/workflows/build-windows.yml from the
 ; PyInstaller onedir output (dist\OmegaWorld). Per-user install, no admin:
 ; the GUI writes dialog_log.jsonl and run_kernel/ next to the exe, so the
@@ -6,7 +6,7 @@
 ; Pass /DBUNDLE_MODEL=1 when the .npz was bundled; the Start Menu shortcut
 ; then launches with --ckpt so the first run is one click, no file picker.
 
-#define AppVersion "0.1.1"
+#define AppVersion "0.1.2"
 #ifndef BundleModel
   #define BundleModel "0"
 #endif
