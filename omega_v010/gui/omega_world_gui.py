@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Omega 小世界 GUI v0.1.1 — Windows 可玩版。
+"""Omega 小世界 GUI v0.1.2 — Windows 可玩版。
 
 纯标准库 tkinter + NumPy，双击 run_gui.bat 运行；启动时选一个模型
 产品 .npz（全能线任意一块都行，Drive 备份里的 s57300 就行）。
@@ -43,6 +43,34 @@ import world_self_probe as wsp
 PERSONAS = ["omega", "紫薇", "悟空", "一一", "Dayan"]
 LOCATIONS = ["花果山", "水帘洞", "高老庄", "流沙河", "取经路", "南海", "天宫"]
 AUTO_STEPS = 12
+
+# ---- 外观（对齐设计稿 ~/workspace/user/files/omega_ui.html；只改表现层）----
+# token 取自稿子：底色 #03050a / #010206，青 #7ff6ff / #38d6e8，
+# 橙 #ffb35c / #ff7a3d，文字 #d9f6ff，等宽字体做标签。tkinter 没有
+# 真圆角/发光/渐变：圆角用 Frame 描边 + Canvas 画，渐变用纯色近似，
+# 发光用描边色 + 浅色字模拟。纯标准库，不引新依赖。
+BG = "#03050a"        # 页面底
+BG_PANEL = "#05060e"  # 星图 / 终端底
+BG_CARD = "#0a1220"   # 按钮 / 卡片底
+BG_INPUT = "#03060c"  # 输入框底
+BG_GLOW = "#2a1a06"   # 星图中心暖光
+CYAN = "#7ff6ff"      # 主青
+CYAN_LINE = "#38d6e8" # 描边青
+CYAN_DIM = "#6fa8ba"  # 暗青（次要文字）
+AMBER = "#ffb35c"     # 主橙
+ORANGE = "#ff7a3d"    # 橙（自动运行按钮）
+TEXT = "#d9f6ff"      # 主文字
+TEXT_SOFT = "#b5e6f2" # 终端文字
+GREEN = "#6dffb0"     # 答对
+RED = "#ff6b86"       # 答错
+BORDER = "#1f4a55"    # 深青描边
+FONT_UI = ("Microsoft YaHei", 10)
+FONT_MONO = ("Consolas", 10)
+FONT_MONO_BIG = ("Consolas", 12, "bold")
+# 星图地点英文副标（稿子里的 Pilgrim Road 一类，只做展示）
+LOC_EN = {"花果山": "FLOWER FRUIT MT", "水帘洞": "WATER CURTAIN",
+          "高老庄": "GAO VILLAGE", "流沙河": "SAND RIVER",
+          "取经路": "PILGRIM ROAD", "南海": "SOUTH SEA", "天宫": "HEAVEN"}
 
 
 class Game:
@@ -222,26 +250,81 @@ class Game:
 class App:
     def __init__(self, root, ckpt=None):
         self.root = root
-        self.root.title("Omega 小世界 v0.1.1")
-        self.root.geometry("780x760")
+        self.root.title("Omega 小世界 v0.1.2")
+        self.root.geometry("780x880")
+        self.root.configure(background=BG)
         try:
             import tkinter.font as tkfont
             tkfont.nametofont("TkDefaultFont").configure(family="Microsoft YaHei", size=10)
             tkfont.nametofont("TkTextFont").configure(family="Microsoft YaHei", size=10)
+            tkfont.nametofont("TkFixedFont").configure(family="Consolas", size=10)
         except Exception:
             pass
+        self._apply_theme()
         self.game = None
         self.busy = False
         self.auto_running = False
         self.auto_left = 0
         self.driver = None  # 内核自动玩的桥接器驱动（未启动时为空）
+        self.move_buttons = {}  # 地点 -> 走动按钮（当前位置高亮用）
         self._build()
         self._set_status("正在准备…")
         self.root.after(200, lambda: self._startup(ckpt))
 
+    def _apply_theme(self):
+        """clam 主题 + 稿子配色：深底、青描边、橙点缀。失败时静默回退
+        系统默认主题（功能不受影响）。"""
+        try:
+            style = ttk.Style(self.root)
+            style.theme_use("clam")
+            style.configure("TFrame", background=BG)
+            style.configure("TLabel", background=BG, foreground=TEXT,
+                            font=FONT_UI)
+            style.configure("TLabelframe", background=BG, foreground=CYAN,
+                            font=FONT_MONO, bordercolor=BORDER)
+            style.configure("TLabelframe.Label", background=BG,
+                            foreground=CYAN, font=FONT_MONO)
+            style.configure("TButton", background=BG_CARD, foreground=TEXT,
+                            font=FONT_UI, bordercolor=BORDER,
+                            focuscolor=CYAN, lightcolor=BG_CARD,
+                            darkcolor=BG_CARD)
+            style.map("TButton",
+                      background=[("active", "#12233a"),
+                                  ("disabled", BG_CARD)],
+                      foreground=[("disabled", CYAN_DIM)])
+            style.configure("Current.TButton", background="#12233a",
+                            foreground=CYAN, bordercolor=CYAN)
+            style.configure("TEntry", fieldbackground=BG_INPUT,
+                            foreground=TEXT, bordercolor=BORDER,
+                            insertcolor=CYAN)
+            style.configure("TCombobox", fieldbackground=BG_INPUT,
+                            foreground=TEXT, bordercolor=BORDER,
+                            arrowcolor=CYAN)
+            style.map("TCombobox",
+                      fieldbackground=[("readonly", BG_INPUT)])
+            style.configure("TCheckbutton", background=BG,
+                            foreground=TEXT_SOFT)
+            style.configure("TNotebook", background=BG,
+                            bordercolor=BORDER)
+            style.configure("TNotebook.Tab", background=BG_CARD,
+                            foreground=CYAN_DIM, font=FONT_UI,
+                            padding=(12, 6), bordercolor=BORDER)
+            style.map("TNotebook.Tab",
+                      background=[("selected", "#12233a")],
+                      foreground=[("selected", CYAN)])
+        except Exception:
+            pass
+
     def _build(self):
+        # ---- 顶栏两行：第一行 logo + 人格 / 意图，第二行状态 pill ----
         top = ttk.Frame(self.root)
-        top.pack(fill="x", padx=8, pady=6)
+        top.pack(fill="x", padx=8, pady=(6, 2))
+        logo = tk.Frame(top, bg=BG)
+        logo.pack(side="left", padx=(0, 8))
+        tk.Label(logo, text="OMEGA // 小世界", font=FONT_MONO_BIG,
+                 fg=CYAN, bg=BG).pack(anchor="w")
+        tk.Label(logo, text="WORLD OF OMEGA", font=("Consolas", 8),
+                 fg=CYAN_DIM, bg=BG).pack(anchor="w")
         ttk.Label(top, text="人格：").pack(side="left")
         self.persona_var = tk.StringVar(value="omega")
         self.persona_cb = ttk.Combobox(top, textvariable=self.persona_var,
@@ -249,16 +332,28 @@ class App:
         self.persona_cb.pack(side="left", padx=4)
         ttk.Label(top, text="我想：").pack(side="left", padx=(8, 0))
         self.intent_var = tk.StringVar()
-        ttk.Entry(top, textvariable=self.intent_var, width=28).pack(side="left", padx=4)
+        ttk.Entry(top, textvariable=self.intent_var, width=20).pack(side="left", padx=4)
         ttk.Button(top, text="应用", command=self._apply_self).pack(side="left", padx=4)
-        self.score_var = tk.StringVar(value="答对 0 / 0")
-        ttk.Label(top, textvariable=self.score_var, foreground="green").pack(side="right")
         self.archive_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(top, text="记录对话", variable=self.archive_var,
-                        command=self._toggle_archive).pack(side="right", padx=6)
+                        command=self._toggle_archive).pack(side="left", padx=6)
+        pills = ttk.Frame(self.root)
+        pills.pack(fill="x", padx=8, pady=(0, 4))
+        self.step_var = tk.StringVar(value="第 0 步 STEP 0")
+        self._pill(pills, self.step_var, CYAN).pack(side="left", padx=(0, 6))
+        self.day_var = tk.StringVar(value="白天 DAY")
+        self._pill(pills, self.day_var, AMBER).pack(side="left", padx=3)
+        self.score_var = tk.StringVar(value="答对 0 / 0")
+        self._pill(pills, self.score_var, CYAN).pack(side="left", padx=3)
 
         wf = ttk.LabelFrame(self.root, text="世界状态")
         wf.pack(fill="x", padx=8, pady=4)
+        # ---- 星图：稿子里的轨道 + 中心核 + 角色节点 + 位置标题 + 物品角标 ----
+        self.map_canvas = tk.Canvas(wf, height=220, bg=BG_PANEL,
+                                    highlightthickness=1,
+                                    highlightbackground=BORDER)
+        self.map_canvas.pack(fill="x", padx=6, pady=(6, 2))
+        self.map_canvas.bind("<Configure>", lambda e: self._draw_map())
         self.world_vars = {}
         for key in ("地点", "时间", "在场人物", "可见物品", "随身物品", "自我"):
             row = ttk.Frame(wf)
@@ -267,49 +362,88 @@ class App:
             v = tk.StringVar(value="—")
             ttk.Label(row, textvariable=v).pack(side="left")
             self.world_vars[key] = v
+        self._draw_map()
 
-        self.log = scrolledtext.ScrolledText(self.root, height=16, state="disabled",
-                                             wrap="word")
+        # ---- 终端：稿子里的 // TERMINAL 框，等宽字体，发言按角色着色 ----
+        self.log = scrolledtext.ScrolledText(self.root, height=12, state="disabled",
+                                             wrap="word", bg=BG_INPUT, fg=TEXT_SOFT,
+                                             font=FONT_MONO, insertbackground=CYAN,
+                                             selectbackground="#12233a",
+                                             relief="flat", borderwidth=1,
+                                             highlightbackground=BORDER,
+                                             highlightthickness=1)
         self.log.pack(fill="both", expand=True, padx=8, pady=4)
+        self.log.tag_configure("you", foreground=CYAN)
+        self.log.tag_configure("omega", foreground=AMBER)
+        self.log.tag_configure("ok", foreground=GREEN)
+        self.log.tag_configure("bad", foreground=RED)
+        self.log.tag_configure("note", foreground=CYAN_DIM)
 
-        mf = ttk.LabelFrame(self.root, text="走动")
-        mf.pack(fill="x", padx=8, pady=4)
+        # ---- 三页签：稿子里的走动 / 动作 / 问问题分段控件 ----
+        nb = ttk.Notebook(self.root)
+        nb.pack(fill="x", padx=8, pady=4)
+        mf = ttk.Frame(nb)
+        nb.add(mf, text="走动 MOVE")
+        af = ttk.Frame(nb)
+        nb.add(af, text="动作 ACTION")
+        qf = ttk.Frame(nb)
+        nb.add(qf, text="问问题 ASK")
+
         for loc in LOCATIONS:
-            ttk.Button(mf, text=loc, width=8,
-                       command=lambda d=loc: self._do(f"去{loc}", lambda: self.game.move(d))).pack(side="left", padx=2)
+            b = ttk.Button(mf, text=loc, width=8,
+                           command=lambda d=loc: self._do(f"去{loc}", lambda: self.game.move(d)))
+            b.pack(side="left", padx=2, pady=4)
+            self.move_buttons[loc] = b
 
-        af = ttk.LabelFrame(self.root, text="动作")
-        af.pack(fill="x", padx=8, pady=4)
         ttk.Button(af, text="查看", width=8,
-                   command=lambda: self._do("查看", self.game.look)).pack(side="left", padx=2)
+                   command=lambda: self._do("查看", self.game.look)).pack(side="left", padx=2, pady=4)
         self.take_frame = ttk.Frame(af)
-        self.take_frame.pack(side="left", padx=6)
+        self.take_frame.pack(side="left", padx=6, pady=4)
         self.talk_frame = ttk.Frame(af)
-        self.talk_frame.pack(side="left", padx=6)
+        self.talk_frame.pack(side="left", padx=6, pady=4)
 
-        qf = ttk.LabelFrame(self.root, text="问问题")
-        qf.pack(fill="x", padx=8, pady=4)
         for qi, q in enumerate(wsp.QUESTIONS):
             ttk.Button(qf, text=q, width=16,
                        command=lambda i=qi: self._do(f"问：{wsp.QUESTIONS[i]}",
-                                                      lambda: self.game.ask(i))).pack(side="left", padx=2)
+                                                      lambda: self.game.ask(i))).pack(side="left", padx=2, pady=4)
         self.free_var = tk.StringVar()
-        ttk.Entry(qf, textvariable=self.free_var, width=24).pack(side="left", padx=4)
-        ttk.Button(qf, text="发送", command=self._ask_free).pack(side="left")
+        ttk.Entry(qf, textvariable=self.free_var, width=24).pack(side="left", padx=4, pady=4)
+        ttk.Button(qf, text="发送", command=self._ask_free).pack(side="left", pady=4)
 
         bf = ttk.Frame(self.root)
         bf.pack(fill="x", padx=8, pady=6)
-        self.auto_btn = ttk.Button(bf, text="内核自动玩 12 步", command=self._auto_start)
+        # ---- 自动运行：稿子里的橙色渐变大按钮（tkinter 无渐变，用纯色近似）----
+        self.auto_btn = tk.Button(bf, text=">> 内核自动运行 · AUTO-RUN 12 STEPS",
+                                  command=self._auto_start,
+                                  bg=ORANGE, fg="#1a0d02",
+                                  activebackground=AMBER,
+                                  activeforeground="#1a0d02",
+                                  disabledforeground=CYAN_DIM,
+                                  font=("Consolas", 11, "bold"),
+                                  relief="flat", padx=16, pady=6)
         self.auto_btn.pack(side="left", padx=2)
-        self.stop_btn = ttk.Button(bf, text="停", command=self._auto_stop, state="disabled")
+        self.stop_btn = tk.Button(bf, text="停", command=self._auto_stop,
+                                  state="disabled",
+                                  bg=BG_CARD, fg=TEXT,
+                                  activebackground="#12233a",
+                                  disabledforeground=CYAN_DIM,
+                                  font=FONT_UI, relief="flat", padx=12, pady=6)
         self.stop_btn.pack(side="left", padx=2)
         self.auto_var = tk.StringVar(value="")
-        ttk.Label(bf, textvariable=self.auto_var).pack(side="left", padx=8)
+        tk.Label(bf, textvariable=self.auto_var, font=FONT_MONO,
+                 fg=CYAN_DIM, bg=BG).pack(side="left", padx=8)
 
         self.status_var = tk.StringVar(value="")
-        ttk.Label(self.root, textvariable=self.status_var, relief="sunken",
-                  anchor="w").pack(fill="x", padx=8, pady=(0, 6))
+        tk.Label(self.root, textvariable=self.status_var, font=FONT_MONO,
+                 fg=CYAN_DIM, bg=BG_PANEL, anchor="w").pack(fill="x", padx=8, pady=(0, 6))
         self._set_enabled(False)
+
+    @staticmethod
+    def _pill(parent, textvar, color):
+        """稿子里的状态 pill：深底 + 彩色细框 + 等宽字。"""
+        return tk.Label(parent, textvariable=textvar, font=FONT_MONO,
+                        fg=color, bg=BG_CARD, relief="solid",
+                        borderwidth=1, padx=8, pady=2)
 
     def _set_enabled(self, on):
         for w in (self.persona_cb, self.auto_btn):
@@ -369,6 +503,17 @@ class App:
         self.world_vars["随身物品"].set(join(st.carried_items()))
         self.world_vars["自我"].set(self.game.me.anchor_lines())
         self.score_var.set(f"答对 {self.game.correct} / {self.game.total}")
+        self.step_var.set(f"第 {st.time_step} 步 STEP {st.time_step}")
+        self.day_var.set(f"{st.day_night()} "
+                         f"{'NIGHT' if st.day_night() == '夜晚' else 'DAY'}")
+        # 当前位置的走动按钮高亮（稿子里的 YOU ARE HERE）
+        for loc, b in self.move_buttons.items():
+            try:
+                b.configure(style="Current.TButton"
+                            if loc == st.visitor_location else "TButton")
+            except Exception:
+                pass
+        self._draw_map()
         for frame, items, verb, fn in (
                 (self.take_frame, st.present_items(), "拾取", self.game.take),
                 (self.talk_frame, st.present_characters(), "对话", self.game.talk)):
@@ -382,10 +527,128 @@ class App:
                                f"{v}{n}", lambda: f(n))).pack(side="left", padx=2)
 
     def _log(self, text):
+        """终端着色：你（青）、欧米伽（橙）、答对（绿）、答错（红），
+        其余默认终端色。签名与旧版一致，仍是一次一行纯文本。"""
         self.log.configure(state="normal")
-        self.log.insert("end", text + "\n")
+        for line in str(text).split("\n"):
+            if line.startswith("你："):
+                self.log.insert("end", "你：", "you")
+                self._insert_verdict(line[2:])
+            elif line.startswith("欧米伽："):
+                self.log.insert("end", "欧米伽：", "omega")
+                self._insert_verdict(line[4:])
+            elif line:
+                self._insert_verdict(line)
+            self.log.insert("end", "\n")
         self.log.configure(state="disabled")
         self.log.see("end")
+
+    def _insert_verdict(self, text):
+        """把一行里的 [✓ 答对] / [✗ 答错] 标绿 / 标红，括号备注标暗青。"""
+        import re
+        for part in re.split(r"(\[✓ 答对\]|\[✗ 答错\])", text):
+            if part == "[✓ 答对]":
+                self.log.insert("end", part, "ok")
+            elif part == "[✗ 答错]":
+                self.log.insert("end", part, "bad")
+            elif part.startswith("（") and part.endswith("）"):
+                self.log.insert("end", part, "note")
+            elif part:
+                self.log.insert("end", part)
+
+    def _draw_map(self):
+        """画稿子里的星图：星星 + 暖光 + 双轨道 + 中心核 + 角色节点
+        + 左上地点标题 + 右下可拾取物品角标。没加载模型时只画底图
+        （轨道、中心核、占位标题），不读游戏状态。"""
+        cv = getattr(self, "map_canvas", None)
+        if cv is None:
+            return
+        try:
+            cv.delete("all")
+            w = cv.winfo_width() or 748
+            h = 220
+            cx, cy = w // 2, h // 2
+            import math
+            import random
+            # 星星（固定种子，位置不跳）
+            rng = random.Random(42)
+            for _ in range(14):
+                x = rng.randint(20, max(21, w - 20))
+                y = rng.randint(12, h - 12)
+                r = rng.choice((1, 2))
+                cv.create_oval(x - r, y - r, x + r, y + r,
+                               fill="#d9f6ff", outline="")
+            # 中心暖光：三层同心圆由深到浅模拟径向光晕
+            for rx, ry, col in ((150, 88, "#141005"), (115, 68, "#1d1507"),
+                                (85, 50, BG_GLOW)):
+                cv.create_oval(cx - rx, cy - ry, cx + rx, cy + ry,
+                               fill=col, outline="")
+            # 双轨道（虚线圆）
+            cv.create_oval(cx - 175, cy - 88, cx + 175, cy + 88,
+                           outline="#6b4a22", dash=(5, 4), width=1)
+            cv.create_oval(cx - 112, cy - 56, cx + 112, cy + 56,
+                           outline="#2a5a66", dash=(5, 4), width=1)
+            # 四角定位框（稿子里的 corner bracket）
+            for x0, y0, dx, dy in ((8, 8, 1, 1), (w - 8, 8, -1, 1),
+                                   (8, h - 8, 1, -1), (w - 8, h - 8, -1, -1)):
+                cv.create_line(x0, y0 + 14 * dy, x0, y0, x0 + 14 * dx, y0,
+                               fill=CYAN, width=2)
+            # 中心核：橙色圆 + 亮心 + 人名
+            cv.create_oval(cx - 34, cy - 34, cx + 34, cy + 34,
+                           fill=AMBER, outline="#fff1d6", width=1)
+            cv.create_oval(cx - 20, cy - 20, cx + 20, cy + 20,
+                           fill="#fff1d6", outline="")
+            cv.create_text(cx, cy - 4, text="欧米伽", font=("Microsoft YaHei", 11, "bold"),
+                           fill="#1a0d02")
+            cv.create_text(cx, cy + 12, text="OMEGA · YOU",
+                           font=("Consolas", 7), fill="#3a1a04")
+            # 状态（有模型才读；没模型画占位）
+            loc, step, chars, items = "—", 0, [], []
+            if getattr(self, "game", None) is not None:
+                st = self.game.state
+                loc = st.visitor_location
+                step = st.time_step
+                chars = st.present_characters()
+                items = st.present_items()
+            # 在场人物 → 内轨道节点（青框圆，字取名字首字）；随步数缓慢转
+            n = len(chars)
+            for i, name in enumerate(chars):
+                ang = math.radians(200 + i * (360.0 / max(n, 1)) + step * 10)
+                x = cx + 112 * math.cos(ang)
+                y = cy + 56 * math.sin(ang)
+                self._draw_node(x, y, name[0], CYAN)
+            # 首件可见物品 → 外轨道橙节点（稿子里的龙节点位）+ 右下角标
+            if items:
+                ang = math.radians(45 + step * 10)
+                x = cx + 175 * math.cos(ang)
+                y = cy + 88 * math.sin(ang)
+                self._draw_node(x, y, items[0][0], AMBER)
+                tid = cv.create_text(w - 16, h - 23,
+                                     text=f"{items[0]} · 可拾取", anchor="e",
+                                     font=FONT_MONO, fill=AMBER)
+                x0, y0, x1, y1 = cv.bbox(tid)
+                cv.create_rectangle(x0 - 8, y0 - 4, x1 + 8, y1 + 4,
+                                    fill="#120a04", outline=AMBER, width=1)
+                cv.tag_raise(tid)
+            # 左上地点标题：地点名 + 英文副标 + 步数/在场人数
+            cv.create_text(16, 16, text=loc, anchor="nw",
+                           font=("Consolas", 14, "bold"), fill=CYAN)
+            cv.create_text(16, 40, text=LOC_EN.get(loc, ""),
+                           anchor="nw", font=("Consolas", 9), fill="#9fd8e6")
+            cv.create_text(16, 56,
+                           text=f"STEP {step} · 在场 {len(chars)} 人",
+                           anchor="nw", font=("Consolas", 9), fill=CYAN_DIM)
+        except Exception:
+            # 画布画失败不影响玩：星图只是展示，静默跳过
+            pass
+
+    def _draw_node(self, x, y, label, color):
+        """星图节点：深底圆 + 彩色描边 + 一个字。"""
+        cv = self.map_canvas
+        cv.create_oval(x - 16, y - 16, x + 16, y + 16,
+                       fill="#070d18", outline=color, width=1)
+        cv.create_text(x, y, text=label, font=("Microsoft YaHei", 13),
+                       fill=color)
 
     def _do(self, label, fn):
         if not self.game or self.busy:
