@@ -53,6 +53,12 @@ VOCAB_JSON = HERE / "generalist_vocab.json"
 RATIOS = [("经典", 0.25), ("代码", 0.20), ("对话", 0.10),
           ("常识", 0.15), ("推理", 0.15), ("世界", 0.15)]  # v2（2026-11-13）
 
+# 门控分流（2026-11-16，用户：双半脑，门按内容动态定百分比）：
+# 左支吃推理类域，右支吃世界域；门的监督目标 t=1 走左，t=0 走右。
+# 世界域只占 15%，右支吃得少——先跑起来看门分不分得开，不够再提配比。
+GATE_LEFT_DOMAINS = ("经典", "代码", "对话", "常识", "推理")
+GATE_RIGHT_DOMAINS = ("世界",)
+
 _ZH = "零一二三四五六七八九十"
 
 
@@ -112,8 +118,20 @@ def domain_texts(tok):
     # v9 修法 A（2026-11-12，用户选 C）：摘要地点压后，问答距离 ~53→7 字
     # v10（2026-11-12，用户选 B＋探针格式）：加探针格式记录 600 条
     # （摘要＋探针原问＋标准答案，无锚定行、无“问：”包装，与循环探针同格式）
+    # 寄存器格式（地点，2026-11-13，用户：教反射，从第 5 块加这 150 条）
+    # 寄存器格式（随身＋昼夜，2026-11-14，用户：随身＋昼夜都接，从第 14 块加）
+    # 寄存器格式（人物，2026-11-15，用户：做人物寄存器，第 15 块接）
+    # 做视频经验（2026-11-16，用户：motion-cli 分支做视频的经验也进语料；
+    # 只加文字，不加视频/图片文件；52 条，2,512 字，0 超词表字符）
+    # 第零步补洞（2026-11-16，用户：做 A；探针格式 Q2/Q3 各 1 条＋随身/昼夜
+    # 寄存器各 1 条；冻结环总在第零步考而训练里第零步是 0 条；从下次断点
+    # 续跑或下块起跑生效——门控首块语料已载入，不进首块前半段）
     for name in ("world_tool_records_v9.jsonl", "self_report_records_v9.jsonl",
-                 "probe_format_records.jsonl", "register_format_records.jsonl"):
+                 "probe_format_records.jsonl", "register_format_records.jsonl",
+                 "carried_register_format_records.jsonl",
+                 "daytime_register_format_records.jsonl",
+                 "character_register_format_records.jsonl",
+                 "video_making_records.jsonl"):
         for line in open(HERE / name, encoding="utf-8"):
             world.append(json.loads(line)["text"])
     texts["世界"] = "\n".join(world)
@@ -151,16 +169,21 @@ def make_batch_fn(ids, seq_len, batch_size=8, seed=7):
         # 注意：train_steps 传进来的 r 就是它自己的 rng；这里用独立 rng
         # 抽域，保证配比不受训练 rng 影响。分层取数：每批各域条数固定，
         # 域内窗口随机，批内顺序打乱。
-        inputs, targets = [], []
+        # 第三返回值 gate 是门的监督目标（B, S）：左支域 1.0，世界域 0.0；
+        # train_steps 只在 merge=gated 时把它传给 loss_and_grads。
+        inputs, targets, gate = [], [], []
         for d, c in enumerate(counts):
             arr = ids[names[d]]
+            t = 1.0 if names[d] in GATE_LEFT_DOMAINS else 0.0
             for _ in range(int(c)):
                 s = int(rng.integers(0, len(arr) - seq_len - 1))
                 inputs.append(arr[s:s + seq_len])
                 targets.append(arr[s + 1:s + seq_len + 1])
+                gate.append(np.full(seq_len, t, dtype=np.float32))
         order = rng.permutation(len(inputs))
         return (np.stack([inputs[i] for i in order]),
-                np.stack([targets[i] for i in order]))
+                np.stack([targets[i] for i in order]),
+                np.stack([gate[i] for i in order]))
 
     return batch_fn
 
@@ -187,8 +210,13 @@ def main():
     ap.add_argument("--seq", type=int, default=128)  # B（2026-11-12）：64→128
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=7)
-    ap.add_argument("--merge", choices=("single", "average", "concat"),
-                    default="single", help="分支合并方式（v2 试点定 single 还是 average）")
+    ap.add_argument("--merge", choices=("single", "average", "concat", "gated"),
+                    default="single", help="分支合并方式（v2 用 single；v3 双半脑用 gated）")
+    ap.add_argument("--recipe", default="generalist-v2",
+                    help="配方名，写进检查点 extra（v3 双半脑：generalist-v3）")
+    ap.add_argument("--gate-loss-weight", type=float, default=1.0,
+                    help="门监督 loss 权重（只在 --merge gated 时生效；"
+                         "门按域目标 t=1 走左 / t=0 走右学百分比）")
     ap.add_argument("--tie", action="store_true",
                     help="tied embeddings：输出头复用输入 embedding（v2 默认开，省 2.37M 参数）")
     ap.add_argument("--dropout", type=float, default=0.0,
@@ -279,11 +307,16 @@ def main():
         batch_fn=batch_fn, checkpoint_path=args.out,
         resume_from=resume_from, save_every=(args.save_every or None),
         label_smoothing=args.label_smoothing, dropout=args.dropout,
-        extra_meta={"tokenizer": tok.to_meta(), "recipe": "generalist-v2",
+        gate_loss_weight=(args.gate_loss_weight if args.merge == "gated" else 0.0),
+        extra_meta={"tokenizer": tok.to_meta(), "recipe": args.recipe,
                     "ratios": dict(RATIOS), "seq_len": args.seq,
                     "merge": args.merge, "tied": args.tie,
                     "dropout": args.dropout,
-                    "label_smoothing": args.label_smoothing})
+                    "label_smoothing": args.label_smoothing,
+                    "gate_loss_weight": (args.gate_loss_weight
+                                         if args.merge == "gated" else 0.0),
+                    "gate": ("left=经典/代码/对话/常识/推理, right=世界"
+                             if args.merge == "gated" else None)})
     dt = time.time() - t0
     print(f"done: {steps} steps in {dt:.1f}s "
           f"({dt / max(steps, 1):.2f} s/step) -> {args.out}")
