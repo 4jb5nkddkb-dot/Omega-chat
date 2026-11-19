@@ -63,12 +63,12 @@ jobs:
         shell: pwsh
 
       - name: Zip the plain folder (no-install fallback)
-        run: Compress-Archive -Path dist/OmegaWorld -DestinationPath installer-out/OmegaWorld-0.1.2-folder.zip
+        run: Compress-Archive -Path dist/OmegaWorld -DestinationPath installer-out/OmegaWorld-0.1.3-folder.zip
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: OmegaWorld-windows-0.1.2
+          name: OmegaWorld-windows-0.1.3
           path: |
-            installer-out/OmegaWorld-Setup-0.1.2.exe
-            installer-out/OmegaWorld-0.1.2-folder.zip
+            installer-out/OmegaWorld-Setup-0.1.3.exe
+            installer-out/OmegaWorld-0.1.3-folder.zip
