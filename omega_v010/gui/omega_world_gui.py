@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Omega 小世界 GUI v0.1.2 — Windows 可玩版。
+"""Omega 小世界 GUI v0.1.3 — Windows 可玩版。
 
 纯标准库 tkinter + NumPy，双击 run_gui.bat 运行；启动时选一个模型
 产品 .npz（全能线任意一块都行，Drive 备份里的 s57300 就行）。
@@ -39,6 +39,7 @@ import world_anchor as wa
 import world_loop as wl
 import world_state as ws
 import world_self_probe as wsp
+from player_progress import PlayerProgress
 
 PERSONAS = ["omega", "紫薇", "悟空", "一一", "Dayan"]
 LOCATIONS = ["花果山", "水帘洞", "高老庄", "流沙河", "取经路", "南海", "天宫"]
@@ -90,6 +91,12 @@ class Game:
         self.archive_path = HERE / "dialog_log.jsonl"
         self.archive_on = True
         self.archive_warned = False
+        # 玩家进度（flutter/games 的 PlayerProgress 模式）：到过几处地点、
+        # 拾过几件物品、取经完成几次，存 player_progress.json。出生地
+        # 取经路算到过，pill 起手就是足迹 1/7。
+        self.progress = PlayerProgress(HERE / "player_progress.json",
+                                       locations=LOCATIONS)
+        self.progress.visit(self.state.visitor_location)
         self.memory = ar.CognitiveMemoryBuffer(capacity=3)
         self._last_turn = None  # 最近一次模型调用的输入（供 record 写档用）
 
@@ -146,17 +153,24 @@ class Game:
 
     def move(self, dest):
         res = self.state.move(dest)
+        completed = self.progress.visit(dest)
         cont = self.generate(self.anchor_prompt(f"你来到了{dest}，说说这里。"), 16)
         flags = self.state.validate(cont)
         if not flags:
             self._remember(f"你来到了{dest}，说说这里。", cont)
-        return res + cont, (1.0 if flags else 0.0), "; ".join(flags)
+        text = res + cont
+        if completed:
+            text += (f"\n★ 七地走遍，取经完成！这是第 {self.progress.pilgrimages} "
+                     "次走完。新的取经路开始了。")
+        return text, (1.0 if flags else 0.0), "; ".join(flags)
 
     def look(self):
         return self.state.look(""), 0.0, ""
 
     def take(self, item):
         res = self.state.take(item)
+        if "拾起了" in res:
+            self.progress.collect(item)
         return res, (0.0 if "拾起了" in res else 1.0), ""
 
     def talk(self, name):
@@ -250,8 +264,14 @@ class Game:
 class App:
     def __init__(self, root, ckpt=None):
         self.root = root
-        self.root.title("Omega 小世界 v0.1.2")
-        self.root.geometry("780x880")
+        self.root.title("Omega 小世界 v0.1.3")
+        # 默认窗口按屏幕高度自适应：768 高的本本上不再顶出屏幕，底栏够得着。
+        _sh = self.root.winfo_screenheight()
+        _h = min(880, max(620, _sh - 60))
+        self.root.geometry(f"780x{_h}")
+        # 最小高 700：再小固定行（顶栏/星图/页签/底栏/状态）就塞不下，
+        # grid 会把页签压到终端上面叠在一起。
+        self.root.minsize(700, 700)
         self.root.configure(background=BG)
         try:
             import tkinter.font as tkfont
@@ -316,9 +336,15 @@ class App:
             pass
 
     def _build(self):
+        # 根窗口用 grid：只有终端行（row 3）能伸缩，其余行固定高度。
+        # 窗口不够高时只压终端，页签和底栏永远够得着。之前全用 pack，
+        # 终端（expand）排在页签前面，窗口一矮 pack 就先压最后排的
+        # 页签/底栏/状态条，768 高的屏上最大化也点不到底栏。
+        self.root.grid_columnconfigure(0, weight=1)
+        self.root.grid_rowconfigure(3, weight=1)
         # ---- 顶栏两行：第一行 logo + 人格 / 意图，第二行状态 pill ----
         top = ttk.Frame(self.root)
-        top.pack(fill="x", padx=8, pady=(6, 2))
+        top.grid(row=0, column=0, sticky="ew", padx=8, pady=(6, 2))
         logo = tk.Frame(top, bg=BG)
         logo.pack(side="left", padx=(0, 8))
         tk.Label(logo, text="OMEGA // 小世界", font=FONT_MONO_BIG,
@@ -338,18 +364,20 @@ class App:
         ttk.Checkbutton(top, text="记录对话", variable=self.archive_var,
                         command=self._toggle_archive).pack(side="left", padx=6)
         pills = ttk.Frame(self.root)
-        pills.pack(fill="x", padx=8, pady=(0, 4))
+        pills.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 4))
         self.step_var = tk.StringVar(value="第 0 步 STEP 0")
         self._pill(pills, self.step_var, CYAN).pack(side="left", padx=(0, 6))
         self.day_var = tk.StringVar(value="白天 DAY")
         self._pill(pills, self.day_var, AMBER).pack(side="left", padx=3)
         self.score_var = tk.StringVar(value="答对 0 / 0")
         self._pill(pills, self.score_var, CYAN).pack(side="left", padx=3)
+        self.progress_var = tk.StringVar(value="足迹 0/7 · 拾取 0/6")
+        self._pill(pills, self.progress_var, GREEN).pack(side="left", padx=3)
 
         wf = ttk.LabelFrame(self.root, text="世界状态")
-        wf.pack(fill="x", padx=8, pady=4)
+        wf.grid(row=2, column=0, sticky="ew", padx=8, pady=4)
         # ---- 星图：稿子里的轨道 + 中心核 + 角色节点 + 位置标题 + 物品角标 ----
-        self.map_canvas = tk.Canvas(wf, height=220, bg=BG_PANEL,
+        self.map_canvas = tk.Canvas(wf, height=170, bg=BG_PANEL,
                                     highlightthickness=1,
                                     highlightbackground=BORDER)
         self.map_canvas.pack(fill="x", padx=6, pady=(6, 2))
@@ -365,14 +393,14 @@ class App:
         self._draw_map()
 
         # ---- 终端：稿子里的 // TERMINAL 框，等宽字体，发言按角色着色 ----
-        self.log = scrolledtext.ScrolledText(self.root, height=12, state="disabled",
+        self.log = scrolledtext.ScrolledText(self.root, height=10, state="disabled",
                                              wrap="word", bg=BG_INPUT, fg=TEXT_SOFT,
                                              font=FONT_MONO, insertbackground=CYAN,
                                              selectbackground="#12233a",
                                              relief="flat", borderwidth=1,
                                              highlightbackground=BORDER,
                                              highlightthickness=1)
-        self.log.pack(fill="both", expand=True, padx=8, pady=4)
+        self.log.grid(row=3, column=0, sticky="nsew", padx=8, pady=4)
         self.log.tag_configure("you", foreground=CYAN)
         self.log.tag_configure("omega", foreground=AMBER)
         self.log.tag_configure("ok", foreground=GREEN)
@@ -381,7 +409,7 @@ class App:
 
         # ---- 三页签：稿子里的走动 / 动作 / 问问题分段控件 ----
         nb = ttk.Notebook(self.root)
-        nb.pack(fill="x", padx=8, pady=4)
+        nb.grid(row=4, column=0, sticky="ew", padx=8, pady=4)
         mf = ttk.Frame(nb)
         nb.add(mf, text="走动 MOVE")
         af = ttk.Frame(nb)
@@ -411,7 +439,7 @@ class App:
         ttk.Button(qf, text="发送", command=self._ask_free).pack(side="left", pady=4)
 
         bf = ttk.Frame(self.root)
-        bf.pack(fill="x", padx=8, pady=6)
+        bf.grid(row=5, column=0, sticky="ew", padx=8, pady=6)
         # ---- 自动运行：稿子里的橙色渐变大按钮（tkinter 无渐变，用纯色近似）----
         self.auto_btn = tk.Button(bf, text=">> 内核自动运行 · AUTO-RUN 12 STEPS",
                                   command=self._auto_start,
@@ -435,7 +463,7 @@ class App:
 
         self.status_var = tk.StringVar(value="")
         tk.Label(self.root, textvariable=self.status_var, font=FONT_MONO,
-                 fg=CYAN_DIM, bg=BG_PANEL, anchor="w").pack(fill="x", padx=8, pady=(0, 6))
+                 fg=CYAN_DIM, bg=BG_PANEL, anchor="w").grid(row=6, column=0, sticky="ew", padx=8, pady=(0, 6))
         self._set_enabled(False)
 
     @staticmethod
@@ -503,6 +531,7 @@ class App:
         self.world_vars["随身物品"].set(join(st.carried_items()))
         self.world_vars["自我"].set(self.game.me.anchor_lines())
         self.score_var.set(f"答对 {self.game.correct} / {self.game.total}")
+        self.progress_var.set(self.game.progress.progress_text())
         self.step_var.set(f"第 {st.time_step} 步 STEP {st.time_step}")
         self.day_var.set(f"{st.day_night()} "
                          f"{'NIGHT' if st.day_night() == '夜晚' else 'DAY'}")
