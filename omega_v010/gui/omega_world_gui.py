@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Omega 小世界 GUI v0.1.3 — Windows 可玩版。
+"""Omega 小世界 GUI v0.1.4 — Windows 可玩版。
 
 纯标准库 tkinter + NumPy，双击 run_gui.bat 运行；启动时选一个模型
 产品 .npz（全能线任意一块都行，Drive 备份里的 s57300 就行）。
@@ -9,6 +9,10 @@
   - 走动：7 个地点按钮，人物会跟你走，昼夜每 4 步一翻。
   - 查看 / 拾取 / 对话：可见物品和在场人物都是按钮，点就行。
   - 问问题：4 道自态问题按钮，或自己打字问。
+  - 抽卡：卡册页签里 60 张卡（人物 30 / 法宝 15 / 地点 15），
+    开包抽卡、集卡；卡包只靠玩得来——每日登录 5 包、走路每 4 步
+    1 包、到新地点 1 包、取经完成 3 包，上限攒 10 包；不卖包。
+    集卡进度和卡包数存 gacha_progress.json，重启还在。
   - 自动玩：按“自动玩 12 步”，桥接器把每步的接地分交给内核，内核逐
     步选出下一个动作（observe / explore / exploit / stabilize），不
     再固定轮换。需要界面旁有桥接器（omega-world-bridge）；没有找到
@@ -23,6 +27,7 @@
 import argparse
 import json
 import os
+import random
 import sys
 import time
 from pathlib import Path
@@ -40,6 +45,7 @@ import world_loop as wl
 import world_state as ws
 import world_self_probe as wsp
 from player_progress import PlayerProgress
+import gacha as gz  # 抽卡：60 张卡池 + 开包经济（v0.1.4，见 gacha.py）
 
 PERSONAS = ["omega", "紫薇", "悟空", "一一", "Dayan"]
 LOCATIONS = ["花果山", "水帘洞", "高老庄", "流沙河", "取经路", "南海", "天宫"]
@@ -72,6 +78,9 @@ FONT_MONO_BIG = ("Consolas", 12, "bold")
 LOC_EN = {"花果山": "FLOWER FRUIT MT", "水帘洞": "WATER CURTAIN",
           "高老庄": "GAO VILLAGE", "流沙河": "SAND RIVER",
           "取经路": "PILGRIM ROAD", "南海": "SOUTH SEA", "天宫": "HEAVEN"}
+# 卡册稀有度配色（和顶栏 pill 的做法一样：深底 + 彩色字）
+RARITY_COLOR = {"SSR": AMBER, "SR": CYAN, "R": GREEN, "C": TEXT_SOFT}
+DIM = "#33525e"  # 没抽到的卡：暗色空位
 
 
 class Game:
@@ -97,6 +106,11 @@ class Game:
         self.progress = PlayerProgress(HERE / "player_progress.json",
                                        locations=LOCATIONS)
         self.progress.visit(self.state.visitor_location)
+        # 抽卡（v0.1.4）：60 张卡池 + 开包经济，存 gacha_progress.json，
+        # 和 player_progress.json 同目录、同容错做法。启动即领每日包
+        # （同日只领一次，没领到就是 0，不报错）。
+        self.gacha = gz.Collection(HERE / "gacha_progress.json")
+        self.daily_packs = self.gacha.daily_pack()
         self.memory = ar.CognitiveMemoryBuffer(capacity=3)
         self._last_turn = None  # 最近一次模型调用的输入（供 record 写档用）
 
@@ -152,8 +166,26 @@ class Game:
         return cont, (1.0 if flags else 0.0), "; ".join(flags)
 
     def move(self, dest):
+        before_step = self.state.time_step
+        is_new = dest not in self.progress.visited
         res = self.state.move(dest)
         completed = self.progress.visit(dest)
+        # 抽卡给包（v0.1.4）：只有真走出去了才算——原地不动不 tick，
+        # 不给包。走路每 4 步 1 包（余数攒着）、到新地点 1 包、
+        # 取经完成 3 包，都按 gacha.py 里已验通的规则，上限 10 包。
+        earned = []
+        if self.state.time_step > before_step:
+            n = self.gacha.earn_for_steps(self.state.time_step - before_step)
+            if n:
+                earned.append(f"走路卡包 +{n}")
+            if is_new:
+                n = self.gacha.earn_for_location()
+                if n:
+                    earned.append("新地点卡包 +1")
+        if completed:
+            n = self.gacha.earn_for_pilgrimage()
+            if n:
+                earned.append("取经完成卡包 +3")
         cont = self.generate(self.anchor_prompt(f"你来到了{dest}，说说这里。"), 16)
         flags = self.state.validate(cont)
         if not flags:
@@ -162,6 +194,8 @@ class Game:
         if completed:
             text += (f"\n★ 七地走遍，取经完成！这是第 {self.progress.pilgrimages} "
                      "次走完。新的取经路开始了。")
+        if earned:
+            text += "\n（" + "、".join(earned) + "）"
         return text, (1.0 if flags else 0.0), "; ".join(flags)
 
     def look(self):
@@ -264,7 +298,7 @@ class Game:
 class App:
     def __init__(self, root, ckpt=None):
         self.root = root
-        self.root.title("Omega 小世界 v0.1.3")
+        self.root.title("Omega 小世界 v0.1.4")
         # 默认窗口按屏幕高度自适应：768 高的本本上不再顶出屏幕，底栏够得着。
         _sh = self.root.winfo_screenheight()
         _h = min(880, max(620, _sh - 60))
@@ -373,6 +407,10 @@ class App:
         self._pill(pills, self.score_var, CYAN).pack(side="left", padx=3)
         self.progress_var = tk.StringVar(value="足迹 0/7 · 拾取 0/6")
         self._pill(pills, self.progress_var, GREEN).pack(side="left", padx=3)
+        self.pack_var = tk.StringVar(value="卡包 0")
+        self._pill(pills, self.pack_var, AMBER).pack(side="left", padx=3)
+        self.album_var = tk.StringVar(value="卡册 0/60")
+        self._pill(pills, self.album_var, CYAN).pack(side="left", padx=3)
 
         wf = ttk.LabelFrame(self.root, text="世界状态")
         wf.grid(row=2, column=0, sticky="ew", padx=8, pady=4)
@@ -407,7 +445,7 @@ class App:
         self.log.tag_configure("bad", foreground=RED)
         self.log.tag_configure("note", foreground=CYAN_DIM)
 
-        # ---- 三页签：稿子里的走动 / 动作 / 问问题分段控件 ----
+        # ---- 四页签：稿子里的走动 / 动作 / 问问题分段控件 + 卡册 ----
         nb = ttk.Notebook(self.root)
         nb.grid(row=4, column=0, sticky="ew", padx=8, pady=4)
         mf = ttk.Frame(nb)
@@ -416,6 +454,9 @@ class App:
         nb.add(af, text="动作 ACTION")
         qf = ttk.Frame(nb)
         nb.add(qf, text="问问题 ASK")
+        gf = ttk.Frame(nb)
+        nb.add(gf, text="卡册 ALBUM")
+        self._build_album(gf)
 
         for loc in LOCATIONS:
             b = ttk.Button(mf, text=loc, width=8,
@@ -506,6 +547,8 @@ class App:
         self._log(f"欢迎来到小世界。你在{self.game.state.visitor_location}，"
                   f"{self.game.state.day_night()}。")
         self._refresh_world()
+        if self.game.daily_packs:
+            self._log(f"今日登录领了 {self.game.daily_packs} 包卡包，卡册页签里能开。")
 
     def _apply_self(self):
         if not self.game:
@@ -532,6 +575,9 @@ class App:
         self.world_vars["自我"].set(self.game.me.anchor_lines())
         self.score_var.set(f"答对 {self.game.correct} / {self.game.total}")
         self.progress_var.set(self.game.progress.progress_text())
+        self.pack_var.set(f"卡包 {self.game.gacha.packs}")
+        self.album_var.set(f"卡册 {self.game.gacha.owned_count()}/60")
+        self._refresh_album()
         self.step_var.set(f"第 {st.time_step} 步 STEP {st.time_step}")
         self.day_var.set(f"{st.day_night()} "
                          f"{'NIGHT' if st.day_night() == '夜晚' else 'DAY'}")
@@ -554,6 +600,129 @@ class App:
                 ttk.Button(frame, text=f"{verb}{name}", width=12,
                            command=lambda n=name, f=fn, v=verb: self._do(
                                f"{v}{n}", lambda: f(n))).pack(side="left", padx=2)
+
+    def _build_album(self, parent):
+        """卡册页签（v0.1.4）：60 张卡分人物 / 宝物 / 地点三类，
+        抽到的亮起、没抽到的留“？？？”空位；顶上一直显示集齐数、
+        尘和卡包数，开包按钮就在页签里。卡片区是固定高度的滚动区
+        ——页签不长高，终端和底栏在 768 高的屏上不受影响。"""
+        head = ttk.Frame(parent)
+        head.pack(fill="x", padx=4, pady=(4, 0))
+        self.album_count_var = tk.StringVar(value="卡册 0/60 · 还差 60 张 · 尘 0")
+        ttk.Label(head, textvariable=self.album_count_var).pack(side="left")
+        self.pack_btn = ttk.Button(head, text="开包（0 包）",
+                                   command=self._open_pack)
+        self.pack_btn.pack(side="right", padx=4)
+        wrap = ttk.Frame(parent)
+        wrap.pack(fill="x", padx=4, pady=(2, 4))
+        self.album_canvas = tk.Canvas(wrap, height=40, bg=BG_PANEL,
+                                      highlightthickness=1,
+                                      highlightbackground=BORDER)
+        vsb = ttk.Scrollbar(wrap, orient="vertical",
+                            command=self.album_canvas.yview)
+        self.album_canvas.configure(yscrollcommand=vsb.set)
+        self.album_canvas.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        self.album_inner = ttk.Frame(self.album_canvas)
+        self._album_win = self.album_canvas.create_window(
+            (0, 0), window=self.album_inner, anchor="nw")
+        self.album_inner.bind(
+            "<Configure>",
+            lambda e: self.album_canvas.configure(
+                scrollregion=self.album_canvas.bbox("all")))
+        self.album_canvas.bind(
+            "<Configure>",
+            lambda e: self.album_canvas.itemconfigure(
+                self._album_win, width=e.width))
+        for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.album_canvas.bind(ev, self._album_wheel)
+            self.album_inner.bind(ev, self._album_wheel)
+        # 卡片：每类一个标题行 + 10 列小卡片；标签只建一次，
+        # 以后就地改字改色，不重建（滚条位置不动）。
+        self.album_chips = {}
+        self.album_headers = {}
+        for c in range(10):
+            self.album_inner.grid_columnconfigure(c, weight=1)
+        row = 0
+        for kind in ("人物", "法宝", "地点"):
+            cards = [c for c in gz.CARDS if c["kind"] == kind]
+            hdr = tk.Label(self.album_inner,
+                           text=f"{kind} · 已集 0/{len(cards)}",
+                           font=("Microsoft YaHei", 9, "bold"),
+                           fg=CYAN_DIM, bg=BG)
+            hdr.grid(row=row, column=0, columnspan=10, sticky="w")
+            self.album_headers[kind] = hdr
+            row += 1
+            for i, c in enumerate(cards):
+                lab = tk.Label(self.album_inner, text="？？？",
+                               font=("Microsoft YaHei", 9),
+                               fg=DIM, bg=BG_PANEL, width=9,
+                               relief="solid", borderwidth=1)
+                lab.grid(row=row + i // 10, column=i % 10,
+                         padx=1, pady=1, sticky="ew")
+                lab.bind("<MouseWheel>", self._album_wheel)
+                lab.bind("<Button-4>", self._album_wheel)
+                lab.bind("<Button-5>", self._album_wheel)
+                self.album_chips[c["name"]] = lab
+            row += (len(cards) + 9) // 10
+
+    def _album_wheel(self, event):
+        """卡册滚动区的滚轮：Windows 是 delta，Linux 是 4/5 号键。"""
+        delta = getattr(event, "delta", 0)
+        if getattr(event, "num", None) == 4 or delta > 0:
+            self.album_canvas.yview_scroll(-1, "units")
+        elif getattr(event, "num", None) == 5 or delta < 0:
+            self.album_canvas.yview_scroll(1, "units")
+
+    def _refresh_album(self):
+        """按收藏情况刷新卡册：抽到的亮起（稀有度配色），没抽到的
+        留“？？？”空位；每类标题和顶上计数、开包按钮同步。"""
+        g = self.game.gacha if self.game else None
+        owned = g.cards if g is not None else {}
+        for kind in ("人物", "法宝", "地点"):
+            cards = [c for c in gz.CARDS if c["kind"] == kind]
+            got = sum(1 for c in cards if c["name"] in owned)
+            self.album_headers[kind].configure(
+                text=f"{kind} · 已集 {got}/{len(cards)}")
+            for c in cards:
+                lab = self.album_chips[c["name"]]
+                if c["name"] in owned:
+                    lab.configure(text=f"【{c['rarity']}】{c['name']}",
+                                  fg=RARITY_COLOR[c["rarity"]])
+                else:
+                    lab.configure(text="？？？", fg=DIM)
+        if g is not None:
+            self.album_count_var.set(
+                f"卡册 {g.owned_count()}/60 · 还差 {60 - g.owned_count()} 张"
+                f" · 尘 {g.dust}")
+            self.pack_btn.configure(text=f"开包（{g.packs} 包）",
+                                    state="normal" if g.packs > 0
+                                    else "disabled")
+
+    def _open_pack(self):
+        """界面里开一包：1 包 5 张，按 gacha.py 已验通的概率和保底；
+        新卡进卡册，重复卡变 10 尘记着、不重复占位。没包时按钮
+        是灰的，点不到这里；真没包就明说去向。"""
+        if not self.game or self.busy:
+            return
+        g = self.game.gacha
+        if g.packs <= 0:
+            self._set_status("没有卡包了：走路、到新地点、取经完成或明天登录再来。")
+            return
+        res = g.open_one(random.Random())
+        if res is None:
+            return
+        parts = []
+        for c in res["drawn"]:
+            if c["name"] in res["new"]:
+                parts.append(f"【{c['rarity']}】{c['name']}（新）")
+            else:
+                parts.append(f"【{c['rarity']}】{c['name']}（重复，尘+10）")
+        pity = "（保底）" if res["pity"] else ""
+        self._log(f"开包{pity}：{'、'.join(parts)}")
+        self._refresh_world()
+        self._set_status(f"开包完成：新卡 {len(res['new'])} 张，"
+                         f"卡册 {g.owned_count()}/60，余 {g.packs} 包。")
 
     def _log(self, text):
         """终端着色：你（青）、欧米伽（橙）、答对（绿）、答错（红），
