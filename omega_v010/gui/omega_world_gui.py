@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Omega 小世界 GUI v0.1.4 — Windows 可玩版。
+"""Omega 小世界 GUI v0.1.5 — Windows 可玩版。
 
 纯标准库 tkinter + NumPy，双击 run_gui.bat 运行；启动时选一个模型
 产品 .npz（全能线任意一块都行，Drive 备份里的 s57300 就行）。
@@ -13,6 +13,12 @@
     开包抽卡、集卡；卡包只靠玩得来——每日登录 5 包、走路每 4 步
     1 包、到新地点 1 包、取经完成 3 包，上限攒 10 包；不卖包。
     集卡进度和卡包数存 gacha_progress.json，重启还在。
+  - 视频：视频页签里输入人物名字（比如孙悟空），点生成，就
+    出一段 5 秒 MP4：封面图缓慢推近，画面上有名字、所在地点
+    和一句台词。视频是本地渲染的（PIL 画帧 + ffmpeg 编码），
+    不改模型、不用联网；存在 videos/ 里，重启还在，点开就能看。
+    名字不在小世界里（只有孙悟空、唐僧、猪八戒、沙僧、白龙马、
+    观音六个人物）就明说，不生成空视频。
   - 自动玩：按“自动玩 12 步”，桥接器把每步的接地分交给内核，内核逐
     步选出下一个动作（observe / explore / exploit / stabilize），不
     再固定轮换。需要界面旁有桥接器（omega-world-bridge）；没有找到
@@ -28,7 +34,9 @@ import argparse
 import json
 import os
 import random
+import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -46,6 +54,7 @@ import world_state as ws
 import world_self_probe as wsp
 from player_progress import PlayerProgress
 import gacha as gz  # 抽卡：60 张卡池 + 开包经济（v0.1.4，见 gacha.py）
+import video_maker as vm  # 视频：输入人名生成 MP4（v0.1.5，见 video_maker.py）
 
 PERSONAS = ["omega", "紫薇", "悟空", "一一", "Dayan"]
 LOCATIONS = ["花果山", "水帘洞", "高老庄", "流沙河", "取经路", "南海", "天宫"]
@@ -298,7 +307,7 @@ class Game:
 class App:
     def __init__(self, root, ckpt=None):
         self.root = root
-        self.root.title("Omega 小世界 v0.1.4")
+        self.root.title("Omega 小世界 v0.1.5")
         # 默认窗口按屏幕高度自适应：768 高的本本上不再顶出屏幕，底栏够得着。
         _sh = self.root.winfo_screenheight()
         _h = min(880, max(620, _sh - 60))
@@ -445,7 +454,7 @@ class App:
         self.log.tag_configure("bad", foreground=RED)
         self.log.tag_configure("note", foreground=CYAN_DIM)
 
-        # ---- 四页签：稿子里的走动 / 动作 / 问问题分段控件 + 卡册 ----
+        # ---- 五页签：稿子里的走动 / 动作 / 问问题分段控件 + 卡册 + 视频 ----
         nb = ttk.Notebook(self.root)
         nb.grid(row=4, column=0, sticky="ew", padx=8, pady=4)
         mf = ttk.Frame(nb)
@@ -457,6 +466,9 @@ class App:
         gf = ttk.Frame(nb)
         nb.add(gf, text="卡册 ALBUM")
         self._build_album(gf)
+        vf = ttk.Frame(nb)
+        nb.add(vf, text="视频 VIDEO")
+        self._build_video(vf)
 
         for loc in LOCATIONS:
             b = ttk.Button(mf, text=loc, width=8,
@@ -549,6 +561,7 @@ class App:
         self._refresh_world()
         if self.game.daily_packs:
             self._log(f"今日登录领了 {self.game.daily_packs} 包卡包，卡册页签里能开。")
+        self._refresh_video()
 
     def _apply_self(self):
         if not self.game:
@@ -723,6 +736,139 @@ class App:
         self._refresh_world()
         self._set_status(f"开包完成：新卡 {len(res['new'])} 张，"
                          f"卡册 {g.owned_count()}/60，余 {g.packs} 包。")
+
+    def _build_video(self, parent):
+        """视频页签（v0.1.5）：输入人物名字，点生成，出一段 5 秒 MP4。
+        列表只留 2 行高、按钮挤在列表右侧，整个页签和卡册页签
+        差不多高，终端不被压扁。生成在后台线程里跑（约几秒），
+        不卡界面；名字不在小世界里就明说。"""
+        self.video_busy = False
+        self._video_thread = None
+        self._video_result = None
+        self._video_progress = None
+        row = ttk.Frame(parent)
+        row.pack(fill="x", padx=4, pady=(4, 0))
+        ttk.Label(row, text="人物名字：").pack(side="left")
+        self.video_var = tk.StringVar()
+        ttk.Entry(row, textvariable=self.video_var, width=14).pack(
+            side="left", padx=4)
+        self.video_btn = ttk.Button(row, text="生成视频",
+                                    command=self._video_generate)
+        self.video_btn.pack(side="left", padx=4)
+        self.video_status_var = tk.StringVar(value="输入孙悟空、观音等名字，生成 5 秒视频。")
+        ttk.Label(row, textvariable=self.video_status_var).pack(
+            side="left", padx=4)
+        lrow = ttk.Frame(parent)
+        lrow.pack(fill="x", padx=4, pady=(2, 4))
+        self.video_listbox = tk.Listbox(lrow, height=2, bg=BG_PANEL,
+                                        fg=TEXT_SOFT, font=FONT_MONO,
+                                        selectbackground="#12233a",
+                                        highlightbackground=BORDER,
+                                        highlightthickness=1)
+        vsb = ttk.Scrollbar(lrow, orient="vertical",
+                            command=self.video_listbox.yview)
+        self.video_listbox.configure(yscrollcommand=vsb.set)
+        self.video_listbox.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="left", fill="y")
+        brow = ttk.Frame(lrow)
+        brow.pack(side="left", padx=(4, 0))
+        ttk.Button(brow, text="打开播放",
+                   command=self._video_open).pack(pady=1)
+        ttk.Button(brow, text="刷新列表",
+                   command=self._refresh_video).pack(pady=1)
+
+    def _refresh_video(self):
+        """按 videos/ 目录刷新视频列表（重启后还在，就是靠读目录）。"""
+        lb = getattr(self, "video_listbox", None)
+        if lb is None:
+            return
+        try:
+            vids = vm.list_videos()
+        except Exception:
+            vids = []
+        sel = lb.curselection()
+        sel_name = lb.get(sel[0]) if sel else None
+        lb.delete(0, "end")
+        for p in vids:
+            lb.insert("end", p.name)
+        if sel_name is not None:
+            for i in range(lb.size()):
+                if lb.get(i) == sel_name:
+                    lb.selection_set(i)
+                    break
+
+    def _video_generate(self):
+        """点“生成视频”：名字先校验（空、陌生名字都不生成），
+        通过了就后台线程渲染，界面不卡，好了再回填列表和状态。"""
+        if not self.game:
+            self.video_status_var.set("还没加载模型，等一下再点。")
+            return
+        if self.video_busy:
+            return
+        name = self.video_var.get().strip()
+        if not name:
+            self.video_status_var.set("先输入一个人物名字，比如孙悟空。")
+            return
+        if name not in vm.valid_names():
+            self.video_status_var.set(
+                f"小世界里没有“{name}”。这里的人物有："
+                + "、".join(vm.valid_names()) + "。")
+            self._log(f"你想看{name}的视频：小世界里没有这个人物。")
+            return
+        loc = None
+        try:
+            loc = self.game.state.char_loc.get(name)
+        except Exception:
+            loc = None
+        self.video_busy = True
+        self._video_result = None
+        self._video_progress = None
+        self.video_btn.configure(state="disabled")
+        self.video_status_var.set(f"正在生成{name}的视频…")
+        self._log(f"你想看{name}的视频：正在生成…")
+        def _run():
+            try:
+                path = vm.render_video(
+                    name, location=loc,
+                    progress=lambda i, n: setattr(
+                        self, "_video_progress", (i, n)))
+                self._video_result = ("ok", path)
+            except Exception as e:
+                self._video_result = ("err", str(e))
+        self._video_thread = threading.Thread(target=_run, daemon=True)
+        self._video_thread.start()
+        self.root.after(200, self._video_poll)
+
+    def _video_poll(self):
+        """后台渲染的心跳：线程没完就 200ms 后再看；完了就回填。"""
+        if self._video_thread is not None and self._video_thread.is_alive():
+            if self._video_progress is not None:
+                i, n = self._video_progress
+                self.video_status_var.set(f"正在生成视频…（{i}/{n} 帧）")
+            self.root.after(200, self._video_poll)
+            return
+        self.video_busy = False
+        self.video_btn.configure(state="normal")
+        kind, val = self._video_result or ("err", "生成中断了。")
+        if kind == "ok":
+            self._refresh_video()
+            self.video_status_var.set(f"视频已生成：{val.name}")
+            self._log(f"{val.name} 已生成，视频页签里点“打开播放”就能看。")
+        else:
+            self.video_status_var.set(val)
+            self._log(f"视频没生成：{val}")
+
+    def _video_open(self):
+        """打开播放选中的视频（系统默认播放器）。"""
+        sel = self.video_listbox.curselection()
+        if not sel:
+            self.video_status_var.set("先在列表里选一个视频。")
+            return
+        name = self.video_listbox.get(sel[0])
+        try:
+            vm.open_video(vm.video_dir() / name)
+        except Exception as e:
+            self.video_status_var.set(str(e))
 
     def _log(self, text):
         """终端着色：你（青）、欧米伽（橙）、答对（绿）、答错（红），
