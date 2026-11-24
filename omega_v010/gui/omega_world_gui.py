@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Omega 小世界 GUI v0.1.5 — Windows 可玩版。
+"""Omega 小世界 GUI v0.1.6 — Windows 可玩版。
 
 纯标准库 tkinter + NumPy，双击 run_gui.bat 运行；启动时选一个模型
 产品 .npz（全能线任意一块都行，Drive 备份里的 s57300 就行）。
@@ -13,12 +13,14 @@
     开包抽卡、集卡；卡包只靠玩得来——每日登录 5 包、走路每 4 步
     1 包、到新地点 1 包、取经完成 3 包，上限攒 10 包；不卖包。
     集卡进度和卡包数存 gacha_progress.json，重启还在。
-  - 视频：视频页签里输入人物名字（比如孙悟空），点生成，就
-    出一段 5 秒 MP4：封面图缓慢推近，画面上有名字、所在地点
-    和一句台词。视频是本地渲染的（PIL 画帧 + ffmpeg 编码），
-    不改模型、不用联网；存在 videos/ 里，重启还在，点开就能看。
-    名字不在小世界里（只有孙悟空、唐僧、猪八戒、沙僧、白龙马、
-    观音六个人物）就明说，不生成空视频。
+  - 视频：视频页签里输入一句提示词（比如“孙悟空在花果山练功”），
+    点生成，就出一段 5 秒 MP4：本地解析提示词里的人物、地点、动作
+    和白天/夜晚，地点定背景色调、动作定镜头快慢、白天/夜晚定明暗，
+    画面上有提示词原文、名字、地点和一句旁白。视频是本地渲染的
+    （PIL 画帧 + ffmpeg 编码），不改模型、不用联网；存在 videos/
+    里，重启还在，点开就能看。只输一个人名（比如孙悟空）也照样
+    生成；提示词里什么都没认出来也生成一段默认的，界面写清认出
+    了什么、默认了什么，不拒绝、不崩。
   - 自动玩：按“自动玩 12 步”，桥接器把每步的接地分交给内核，内核逐
     步选出下一个动作（observe / explore / exploit / stabilize），不
     再固定轮换。需要界面旁有桥接器（omega-world-bridge）；没有找到
@@ -54,7 +56,7 @@ import world_state as ws
 import world_self_probe as wsp
 from player_progress import PlayerProgress
 import gacha as gz  # 抽卡：60 张卡池 + 开包经济（v0.1.4，见 gacha.py）
-import video_maker as vm  # 视频：输入人名生成 MP4（v0.1.5，见 video_maker.py）
+import video_maker as vm  # 视频：输入提示词生成 MP4（v0.1.6，见 video_maker.py）
 
 PERSONAS = ["omega", "紫薇", "悟空", "一一", "Dayan"]
 LOCATIONS = ["花果山", "水帘洞", "高老庄", "流沙河", "取经路", "南海", "天宫"]
@@ -307,7 +309,7 @@ class Game:
 class App:
     def __init__(self, root, ckpt=None):
         self.root = root
-        self.root.title("Omega 小世界 v0.1.5")
+        self.root.title("Omega 小世界 v0.1.6")
         # 默认窗口按屏幕高度自适应：768 高的本本上不再顶出屏幕，底栏够得着。
         _sh = self.root.winfo_screenheight()
         _h = min(880, max(620, _sh - 60))
@@ -738,24 +740,26 @@ class App:
                          f"卡册 {g.owned_count()}/60，余 {g.packs} 包。")
 
     def _build_video(self, parent):
-        """视频页签（v0.1.5）：输入人物名字，点生成，出一段 5 秒 MP4。
+        """视频页签（v0.1.6）：输入一句提示词，点生成，出一段 5 秒 MP4。
         列表只留 2 行高、按钮挤在列表右侧，整个页签和卡册页签
         差不多高，终端不被压扁。生成在后台线程里跑（约几秒），
-        不卡界面；名字不在小世界里就明说。"""
+        不卡界面；提示词里什么都没认出来也生成默认的，状态栏
+        写清认出了什么、默认了什么。"""
         self.video_busy = False
         self._video_thread = None
         self._video_result = None
         self._video_progress = None
         row = ttk.Frame(parent)
         row.pack(fill="x", padx=4, pady=(4, 0))
-        ttk.Label(row, text="人物名字：").pack(side="left")
+        ttk.Label(row, text="提示词：").pack(side="left")
         self.video_var = tk.StringVar()
-        ttk.Entry(row, textvariable=self.video_var, width=14).pack(
+        ttk.Entry(row, textvariable=self.video_var, width=30).pack(
             side="left", padx=4)
         self.video_btn = ttk.Button(row, text="生成视频",
                                     command=self._video_generate)
         self.video_btn.pack(side="left", padx=4)
-        self.video_status_var = tk.StringVar(value="输入孙悟空、观音等名字，生成 5 秒视频。")
+        self.video_status_var = tk.StringVar(
+            value="输入一句提示词，比如“孙悟空在花果山练功”，生成 5 秒视频。")
         ttk.Label(row, textvariable=self.video_status_var).pack(
             side="left", padx=4)
         lrow = ttk.Frame(parent)
@@ -798,41 +802,32 @@ class App:
                     break
 
     def _video_generate(self):
-        """点“生成视频”：名字先校验（空、陌生名字都不生成），
-        通过了就后台线程渲染，界面不卡，好了再回填列表和状态。"""
+        """点“生成视频”：空提示词就提示一句；其余一律进后台线程
+        渲染，界面不卡，好了再回填列表和状态。认出/默认的情况
+        写在状态栏和终端里，什么都没认出来也照样生成。"""
         if not self.game:
             self.video_status_var.set("还没加载模型，等一下再点。")
             return
         if self.video_busy:
             return
-        name = self.video_var.get().strip()
-        if not name:
-            self.video_status_var.set("先输入一个人物名字，比如孙悟空。")
+        prompt = self.video_var.get().strip()
+        if not prompt:
+            self.video_status_var.set("先输入一句提示词，比如“孙悟空在花果山练功”。")
             return
-        if name not in vm.valid_names():
-            self.video_status_var.set(
-                f"小世界里没有“{name}”。这里的人物有："
-                + "、".join(vm.valid_names()) + "。")
-            self._log(f"你想看{name}的视频：小世界里没有这个人物。")
-            return
-        loc = None
-        try:
-            loc = self.game.state.char_loc.get(name)
-        except Exception:
-            loc = None
+        info = vm.parse_prompt(prompt)
         self.video_busy = True
         self._video_result = None
         self._video_progress = None
         self.video_btn.configure(state="disabled")
-        self.video_status_var.set(f"正在生成{name}的视频…")
-        self._log(f"你想看{name}的视频：正在生成…")
+        self.video_status_var.set(f"正在生成视频…（{info['note']}）")
+        self._log(f"你想看“{prompt}”的视频：正在生成…")
         def _run():
             try:
-                path = vm.render_video(
-                    name, location=loc,
+                path, info2 = vm.render_video(
+                    prompt,
                     progress=lambda i, n: setattr(
                         self, "_video_progress", (i, n)))
-                self._video_result = ("ok", path)
+                self._video_result = ("ok", (path, info2))
             except Exception as e:
                 self._video_result = ("err", str(e))
         self._video_thread = threading.Thread(target=_run, daemon=True)
@@ -851,9 +846,11 @@ class App:
         self.video_btn.configure(state="normal")
         kind, val = self._video_result or ("err", "生成中断了。")
         if kind == "ok":
+            path, info = val
             self._refresh_video()
-            self.video_status_var.set(f"视频已生成：{val.name}")
-            self._log(f"{val.name} 已生成，视频页签里点“打开播放”就能看。")
+            self.video_status_var.set(f"视频已生成：{info['note']}")
+            self._log(f"{path.name} 已生成（{info['note']}），"
+                      f"视频页签里点“打开播放”就能看。")
         else:
             self.video_status_var.set(val)
             self._log(f"视频没生成：{val}")
