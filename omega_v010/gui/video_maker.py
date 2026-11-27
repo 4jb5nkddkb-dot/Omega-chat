@@ -138,14 +138,27 @@ def open_video(path):
 
 
 def find_ffmpeg():
-    """找 ffmpeg：环境变量 OMEGA_FFMPEG > 系统 PATH > 游戏目录旁。"""
+    """找 ffmpeg：环境变量 OMEGA_FFMPEG > 系统 PATH > 游戏目录旁。
+
+    打包后（PyInstaller onedir）__file__ 指向的 HERE 未必是 exe
+    所在目录，所以再查冻结程序的真实位置：sys.executable 所在
+    目录（onedir 下 ffmpeg.exe 就落在那里）和 sys._MEIPASS。
+    """
     env = os.environ.get("OMEGA_FFMPEG")
     if env and Path(env).is_file():
         return env
     found = shutil.which("ffmpeg")
     if found:
         return found
-    for cand in (HERE / "ffmpeg.exe", HERE / "ffmpeg"):
+    candidates = [HERE / "ffmpeg.exe", HERE / "ffmpeg"]
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates += [exe_dir / "ffmpeg.exe", exe_dir / "ffmpeg"]
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates += [Path(meipass) / "ffmpeg.exe",
+                           Path(meipass) / "ffmpeg"]
+    for cand in candidates:
         if cand.is_file():
             return str(cand)
     return None
