@@ -1,0 +1,38 @@
+FFmpeg notice — bundled with Omega World (v0.1.6 and later)
+=========================================================
+
+This installer bundles ffmpeg.exe, the FFmpeg command-line tool, so the
+in-game video tab can render MP4 clips out of the box without a separate
+download.
+
+Source of the binary
+--------------------
+Windows static build from https://www.gyan.dev/ffmpeg/builds/
+("ffmpeg-release-essentials.zip"), downloaded at build time by the
+project's CI workflow. The exact FFmpeg version is the one shipped in
+that essentials build at the time the installer was built.
+
+License
+-------
+FFmpeg is licensed under the GNU Lesser General Public License (LGPL),
+but this essentials build includes components (such as libx264) that are
+licensed under the GNU General Public License version 3 (GPLv3), so the
+binary as distributed is governed by GPLv3. The full GPLv3 text is
+available at https://www.gnu.org/licenses/gpl-3.0.txt
+
+Source code
+-----------
+The corresponding FFmpeg source code is available from
+https://ffmpeg.org/releases/ and the gyan.dev builds page above.
+If you received this installer in object-code form, you may also obtain
+the corresponding source code by contacting us through the Omega World
+product page on Gumroad (https://howlwind56411.gumroad.com/l/omega-world);
+this offer is valid for three years from the date you received the
+installer.
+
+What this does NOT change
+-------------------------
+Omega World itself (game code, model, artwork) is not FFmpeg and is not
+covered by the GPLv3 terms above; only the bundled ffmpeg.exe and its
+libraries are. No other third-party component in this installer is
+GPL-licensed.

@@ -20,11 +20,22 @@ MODEL = HERE / os.environ.get("OMEGA_MODEL_FILE", "generalist2_s5100.npz")
 BUNDLE_MODEL = os.environ.get("OMEGA_BUNDLE_MODEL") == "1"
 if BUNDLE_MODEL and not MODEL.is_file():
     raise SystemExit(f"OMEGA_BUNDLE_MODEL=1 but model file missing: {MODEL}")
+# ffmpeg (v0.1.6, bundled per user decision 2026-11-26): CI downloads the
+# gyan.dev essentials build (GPLv3) to omega_v010/packaging/ffmpeg.exe
+# before running PyInstaller; OMEGA_FFMPEG_EXE overrides the filename.
+# video_maker.find_ffmpeg() looks beside the frozen exe, so the binary
+# must land in the onedir root (binaries do that).
+FFMPEG = HERE / os.environ.get("OMEGA_FFMPEG_EXE", "ffmpeg.exe")
+FFMPEG_NOTICE = HERE / "ffmpeg-NOTICE.txt"
 
 datas = [(str(GUI / "omega.toml"), ".")]
+if FFMPEG_NOTICE.is_file():
+    datas.append((str(FFMPEG_NOTICE), "."))
 binaries = []
 if BRIDGE.is_file():
     binaries.append((str(BRIDGE), "."))
+if FFMPEG.is_file():
+    binaries.append((str(FFMPEG), "."))
 if BUNDLE_MODEL and MODEL.is_file():
     datas.append((str(MODEL), "."))
 
@@ -33,7 +44,10 @@ a = Analysis(
     pathex=[str(GUI)],
     binaries=binaries,
     datas=datas,
-    hiddenimports=[],
+    # PIL is imported inside video_maker functions (deferred imports);
+    # list it explicitly so the frozen bundle always carries it.
+    hiddenimports=["PIL", "PIL.Image", "PIL.ImageDraw", "PIL.ImageFont",
+                   "PIL.ImageEnhance"],
     hookspath=[],
     runtime_hooks=[],
     excludes=[],
