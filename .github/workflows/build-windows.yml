@@ -33,8 +33,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install PyInstaller + numpy + gdown
-        run: pip install pyinstaller numpy gdown
+      - name: Install PyInstaller + numpy + gdown + Pillow
+        run: pip install pyinstaller numpy gdown pillow
 
       - name: Build the Rust bridge
         run: cargo build --release --manifest-path omega_v010/Cargo.toml
@@ -46,10 +46,17 @@ jobs:
           if (-not $id) { throw "MODEL_FILE_ID repository variable is not set" }
           gdown $id -O "omega_v010/packaging/${{ inputs.model_file }}"
 
+      - name: Download ffmpeg (gyan.dev essentials, GPLv3 — bundled per user decision 2026-11-26; see omega_v010/packaging/ffmpeg-NOTICE.txt)
+        run: |
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-dl
+          Copy-Item (Get-ChildItem ffmpeg-dl -Recurse -Filter ffmpeg.exe | Select-Object -First 1).FullName -Destination "omega_v010/packaging/ffmpeg.exe"
+
       - name: PyInstaller onedir
         env:
           OMEGA_BUNDLE_MODEL: ${{ inputs.bundle_model && '1' || '0' }}
           OMEGA_MODEL_FILE: ${{ inputs.model_file }}
+          OMEGA_FFMPEG_EXE: ffmpeg.exe
         run: pyinstaller omega_v010/packaging/omega_world.spec --distpath dist --workpath build
 
       - name: Install Inno Setup
@@ -63,12 +70,12 @@ jobs:
         shell: pwsh
 
       - name: Zip the plain folder (no-install fallback)
-        run: Compress-Archive -Path dist/OmegaWorld -DestinationPath installer-out/OmegaWorld-0.1.3-folder.zip
+        run: Compress-Archive -Path dist/OmegaWorld -DestinationPath installer-out/OmegaWorld-0.1.6-folder.zip
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: OmegaWorld-windows-0.1.3
+          name: OmegaWorld-windows-0.1.6
           path: |
-            installer-out/OmegaWorld-Setup-0.1.3.exe
-            installer-out/OmegaWorld-0.1.3-folder.zip
+            installer-out/OmegaWorld-Setup-0.1.6.exe
+            installer-out/OmegaWorld-0.1.6-folder.zip
